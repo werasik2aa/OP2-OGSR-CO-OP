@@ -1,0 +1,1134 @@
+-- файл из мода "Народной солянки 2009" от 14.06.
+-- Адаптирован для Менеджера оружия. Rulix aka Bak от 2.07.09
+-- Адатировал: Idler.
+
+local hide_weapon_outfits = {
+	["akill_soldier_outfit"] = true,
+	["meceniy_outfit_new"] = true,
+	["soldier_outfit"] = true
+}
+
+local no_hit_grnd = {
+	["grenade_flash"] = true,
+	["grenade_gd-05"] = true
+}
+
+-- Слоты, которые не меняем при hide_weapon.
+local unblock = {
+	[8] = true,
+	[16] = true,
+	[17] = true
+}
+
+-- команды, которые нужно блокировать без debug-мода
+local dis_cmd = {
+	"demo_record",
+	"g_crosshair_dbg",
+	"g_god",
+	"g_spawn",
+	"g_vertex_dbg",
+	"g_zones_dbg",
+	"g_unlimitedammo",
+	"jump_to_level",
+	"set_weather",
+	"time_factor",
+	"jump_to_level",
+	"g_game_difficulty",
+	"g_spawn_to_inventory",
+	"save"
+}
+
+-- команды, которые нужно по-умолчанию выключить без debug-мода
+local off_cmd = {
+	"g_crosshair_dbg",
+	"g_god",
+	"g_unlimitedammo",
+	"g_vertex_dbg",
+	"g_zones_dbg"
+}
+
+local upd_time1 = 0
+local upd_time2 = 0
+local upd_time3 = 0
+local updMServer_time = 0
+local updMClient_time = 0
+
+function init(obj)
+	xr_motivator.AddToMotivator(obj)
+end
+
+function actor_init(npc)
+	npc:bind_object(actor_binder(npc))
+end
+
+post_process = 0
+class "actor_binder"(object_binder)
+function actor_binder:__init(obj) super(obj)
+	self.bCheckStart = false
+	self.weather_manager = level_weathers.WeatherManager()
+	self.actor_detector = xr_detector.actor_detector()
+	self.am = ogse_signals.get_mgr()
+	self.am:call("on_load_before_all")
+	self.am:call("on_init", obj)
+end
+
+function actor_binder:net_spawn(data)
+	db.add_actor(self.object)
+	ui_mm_opt_add.del_bad_objects()
+	self.am:call("on_before_spawn")
+	self:fix_ui_inventory_info()
+	-- babah.collectBombs()
+	level.show_indicators()
+
+	self.bCheckStart = true
+
+	if object_binder.net_spawn(self, data) == false then
+		return false
+	end
+	if self.st.disable_input_time == nil then
+		level.enable_input()
+	end
+
+	fly.stop()
+	self.weather_manager:reset()
+	if (actor_stats.add_to_ranking ~= nil) then
+		actor_stats.add_to_ranking(self.object:id())
+	end
+
+	--' Загружаем настройки дропа
+	death_manager.init_drop_settings()
+
+	-- added by xStream for AMK miniSDK
+	-- if xrs_ai then xrs_ai.actor_net_spawn(self) end
+	if rx_ai then
+		rx_ai.actor_net_spawn()
+	end
+
+	amk.on_game_load()
+	sak.add_tail()
+	-- braad_test.false_info()
+	-- end of addition
+	meceniy_work.main()
+	spawn_level_changer.remove_old_teleport()
+	meceniy_utils.net_spawn_callback()
+	-- kostya_level --
+	spawn_teleport.spawn_teleport_exit()
+	spawn_teleport.spawn_teleport_hospital()
+	-- bind_det_arts.start_update()
+	-- netpacket_pda_id = netpacket_pda_create.create_pda()	-- Manool: не нужно уже давно
+	-- Akill begin
+	akill.akill_start_sound()
+	-- Akill end
+	snp.net_spawn() -- snp
+	fly_island.release_completed_fly_islands() -- острова
+	-- nightvision.pnv_switch(nil, false, false) -- ПНВ
+	-- hotkeys.init()
+
+	self.update_cnt = 1
+
+-----------------------------------------------------------
+	-- https://github.com/OGSR/OGSR_GA_Resources/blob/main/gamedata/scripts/bind_stalker.script
+--	cmd("r2_ls_bloom_threshold 1.") --Избавляемся от пересветов
+--	cmd("r2_gloss_factor 1.") --Избавляемся от пересветов
+	cmd("g_cop_death_anim 0") --Отключаем Death Anims, с ними куча багов.
+	cmd("r3_minmax_sm off") --От этого фпс дропается у некоторых при долгой игре.
+--	if get_console():get_integer("r3_dynamic_wet_surfaces_sm_res") < 1024 then
+--		cmd("r3_dynamic_wet_surfaces_sm_res 1024") --Чтобы полос на стенах не было во время дождя.
+--	end
+	cmd("r2_exp_donttest_shad off") --Это экономит фпс.
+
+	if not is_debug_mode then
+		local con = get_console()
+		for _, v in pairs(dis_cmd) do
+			con:disable_command(v)
+		end
+		for _, v in pairs(off_cmd) do
+			con:execute(v .. " off")
+		end
+	end
+-----------------------------------------------------------
+
+	self.am:call("on_spawn", data)
+	ogsr_memory_control.attach()
+	return true
+end
+
+local info2call = {
+	ui_car_body = "on_body_open",
+	ui_car_body_hide = "on_body_hide",
+	ui_inventory = "on_inventory_open",
+	ui_inventory_hide = "on_inventory_hide",
+	ui_pda = "on_pda_open",
+	ui_pda_actor_info = "on_pda_actor_info",
+	ui_pda_contacts = "on_pda_contacts_open",
+	ui_pda_contacts_hide = "on_pda_contacts_hide",
+	ui_pda_diary = "on_pda_diary_open",
+	ui_pda_diary_hide = "on_pda_diary_hide",
+	ui_pda_encyclopedia = "on_pda_encyclopedia_open",
+	ui_pda_encyclopedia_hide = "on_pda_encyclopedia_hide",
+	ui_pda_events = "on_pda_events",
+	ui_pda_hide = "on_pda_hide",
+	ui_pda_jobs = "on_pda_jobs_open",
+	ui_pda_jobs_accomplished = "on_pda_jobs_accomplished",
+	ui_pda_jobs_current = "on_pda_jobs_current",
+	ui_pda_jobs_failed = "on_pda_jobs_failed",
+	ui_pda_jobs_hide = "on_pda_jobs_hide",
+	ui_pda_map_global = "on_pda_map_global",
+	ui_pda_map_local = "on_pda_map_local",
+	ui_pda_news = "on_pda_news_open",
+	ui_pda_news_hide = "on_pda_news_hide",
+	ui_pda_ranking = "on_pda_ranking",
+	ui_talk = "on_talk_open",
+	ui_talk_hide = "on_talk_hide",
+	ui_trade = "on_trade_open",
+	ui_trade_hide = "on_trade_hide"
+}
+
+function actor_binder:fix_ui_inventory_info()
+	for info, _ in pairs(info2call) do
+		if self.object:has_info(info) then
+			-- log3("**[%s]: disable %s", script_name(), info)
+			self.object:disable_info_portion(info)
+		end
+	end
+end
+
+function actor_binder:net_destroy()
+
+	-- added by xStream for AMK miniSDK
+	amk.on_game_save(obj)
+	-- end of addition
+
+	if (actor_stats.remove_from_ranking ~= nil) then
+		actor_stats.remove_from_ranking(self.object:id())
+	end
+	db.del_actor(self.object)
+
+	sr_light.clean_up()
+
+	self.object:set_callback(callback.inventory_info, nil)
+	self.object:set_callback(callback.article_info, nil)
+	self.object:set_callback(callback.on_item_take, nil)
+	self.object:set_callback(callback.on_pickup_item_showing, nil)
+	self.object:set_callback(callback.on_item_drop, nil)
+	self.object:set_callback(callback.trade_sell_buy_item, nil)
+	-- self.object:set_callback(callback.actor_sleep, nil)
+	self.object:set_callback(callback.task_state, nil)
+	-- self.object:set_callback(callback.map_location_added, nil)
+	self.object:set_callback(callback.level_border_enter, nil)
+	self.object:set_callback(callback.level_border_exit, nil)
+	self.object:set_callback(callback.take_item_from_box, nil)
+	self.object:set_callback(callback.use_object, nil)
+	self.object:set_callback(callback.death, nil)
+	--
+	self.object:set_callback(callback.on_key_press, nil)
+	self.object:set_callback(callback.on_key_release, nil)
+	self.object:set_callback(callback.on_key_hold, nil)
+	self.object:set_callback(callback.on_belt, nil)
+	self.object:set_callback(callback.on_ruck, nil)
+	self.object:set_callback(callback.on_slot, nil)
+	self.object:set_callback(callback.on_slot_activate, nil)
+	self.object:set_callback(callback.on_cell_item_select, nil)
+	self.object:set_callback(callback.entity_alive_before_hit, nil)
+	self.object:set_callback(callback.on_before_use_item, nil)
+	self.object:set_callback(callback.on_cell_item_focus, nil)
+	self.object:set_callback(callback.on_cell_item_focus_lost, nil)
+	self.object:set_callback(callback.on_cell_item_mouse, nil)
+	self.object:set_callback(callback.on_actor_weapon_reload, nil)
+	self.object:set_callback(callback.on_actor_weapon_reload_jammed, nil)
+	self.object:set_callback(callback.on_actor_weapon_reload_end, nil)
+	self.object:set_callback(callback.on_actor_weapon_zoom_in, nil)
+	self.object:set_callback(callback.on_actor_weapon_zoom_out, nil)
+	self.object:set_callback(callback.on_actor_weapon_fire, nil)
+	self.object:set_callback(callback.on_actor_jump, nil)
+	self.object:set_callback(callback.on_actor_land, nil)
+	self.object:set_callback(callback.on_footstep, nil)
+	self.object:set_callback(callback.level_changer_action, nil)
+	self.object:set_callback(callback.hit, nil)
+	self.object:set_callback(callback.place_item_to_box, nil)
+	self.object:set_callback(callback.on_throw_grenade, nil)
+	self.object:set_callback(callback.on_mouse_move, nil)
+	--
+	if sr_psy_antenna.psy_antenna then
+		sr_psy_antenna.psy_antenna:destroy()
+		sr_psy_antenna.psy_antenna = false
+	end
+	xr_sound.stop_all_sound_object()
+	object_binder.net_destroy(self)
+	op2.print_size_info()
+	self.am:call("on_destroy")
+end
+
+function sortStat(t1, t2)
+	return t1[2] > t2[2]
+end
+
+function actor_binder:reinit()
+	object_binder.reinit(self)
+
+	local npc_id = self.object:id()
+	db.storage[npc_id] = {}
+	self.st = db.storage[npc_id]
+	self.st.pstor = nil
+
+	self.next_restrictors_update_time = -10000
+
+	self.object:set_callback(callback.inventory_info, self.info_callback, self)
+	self.object:set_callback(callback.article_info, self.article_callback, self)
+	self.object:set_callback(callback.on_item_take, self.on_item_take, self)
+	self.object:set_callback(callback.on_pickup_item_showing, self.on_pickup, self)
+	self.object:set_callback(callback.on_item_drop, self.on_item_drop, self)
+	self.object:set_callback(callback.trade_sell_buy_item, self.on_trade, self) -- for game stats
+	-- self.object:set_callback(callback.actor_sleep, self.sleep_callback, self)
+	self.object:set_callback(callback.task_state, self.task_callback, self)
+	-- self.object:set_callback(callback.map_location_added, self.map_location_added_callback, self)
+	self.object:set_callback(callback.level_border_enter, self.level_border_enter, self)
+	self.object:set_callback(callback.level_border_exit, self.level_border_exit, self)
+	self.object:set_callback(callback.take_item_from_box, self.take_item_from_box, self)
+	self.object:set_callback(callback.use_object, self.on_use_object, self)
+	self.object:set_callback(callback.death, self.death_callback, self)
+	--
+	self.object:set_callback(callback.on_key_press, self.on_key, self)
+	self.object:set_callback(callback.on_key_release, self.on_key_free, self)
+	self.object:set_callback(callback.on_key_hold, self.on_key_hold, self)
+	self.object:set_callback(callback.on_belt, self.item_to_belt, self)
+	self.object:set_callback(callback.on_ruck, self.item_to_backpack, self)
+	self.object:set_callback(callback.on_slot, self.item_to_slot, self)
+	self.object:set_callback(callback.on_slot_activate, self.on_slot_activate, self)
+	self.object:set_callback(callback.on_cell_item_select, self.on_select_item, self)
+	self.object:set_callback(callback.entity_alive_before_hit, self.before_hit_callback, self)
+	self.object:set_callback(callback.on_before_use_item, self.before_use, self)
+	self.object:set_callback(callback.on_cell_item_focus, self.on_cell_item_focus, self)
+	self.object:set_callback(callback.on_cell_item_focus_lost, self.on_cell_item_focus_lost, self)
+	self.object:set_callback(callback.on_cell_item_mouse, self.on_cell_item_mouse, self)
+	self.object:set_callback(callback.on_mouse_wheel, self.on_wheel_rotation, self)
+	self.object:set_callback(callback.on_actor_weapon_zoom_in, self.on_actor_weapon_zoom_in, self)
+	self.object:set_callback(callback.on_actor_weapon_zoom_out, self.on_actor_weapon_zoom_out, self)
+	self.object:set_callback(callback.on_actor_weapon_reload, self.on_actor_weapon_reload, self)
+	self.object:set_callback(callback.on_actor_weapon_reload_jammed, self.on_actor_weapon_reload_jammed, self)
+	self.object:set_callback(callback.on_actor_weapon_reload_end, self.on_actor_weapon_reload_end, self)
+	self.object:set_callback(callback.on_actor_weapon_fire, self.on_actor_weapon_fire, self)
+	self.object:set_callback(callback.on_footstep, self.on_footstep, self)
+	self.object:set_callback(callback.on_actor_jump, self.on_actor_jump, self) --Prophet13: Добавлено мной в движок.
+	self.object:set_callback(callback.on_actor_land, self.on_actor_land, self) --Prophet13: Добавлено мной в движок.
+	self.object:set_callback(callback.level_changer_action, self.level_changer_action, self)
+	self.object:set_callback(callback.hit, self.actor_hit_callback, self)
+	self.object:set_callback(callback.place_item_to_box, self.on_inv_box_put_item, self)
+	self.object:set_callback(callback.on_throw_grenade, self.on_throw_grenade, self)
+	self.object:set_callback(callback.on_mouse_move, self.on_mouse_move, self)
+	--
+end
+
+function actor_binder:death_callback(victim, who)
+	if victim:id() == db.actor:id() then
+		self.am:call("on_before_actor_death", victim, who)
+		difficulty_manager.deathStatCollect()
+		archievements.on_actor_death(who)
+		
+		--Prophet13: Перенесено из akill.script
+		if has_info("survival_quest_start") and not has_info("survival_quest_done") then
+			give_info("survival_quest_fail")
+		end
+		MClientOnEvents.OnIDead(victim)
+	end
+
+	-- Правка неотключения пения контролера после смерти гг
+	if kostya_dialog.kill_online_kontroller() then
+		-- sms(db.actor, "Если во время смерти ГГ звучало \"пение\" контролера, то дождитесь его завершения прежде, чем загрузить сохранение, иначе придется полностью перезапускать игру.", nil, "nano", 30000)
+	end
+	-- log3("##[%s]: Actor death, who: [%s]", script_name(), who:name())
+end
+
+--------------------------------------------------------------------------------------------------------
+-------------------------------------------- OGSR CALLBACKS --------------------------------------------
+--------------------------------------------------------------------------------------------------------
+
+function actor_binder:on_key(key, bind)
+	self.am:call("on_key", key, bind)
+end
+
+function actor_binder:on_key_free(key, bind)
+	self.am:call("on_key_up", key, bind)
+end
+
+function actor_binder:on_key_hold(key, bind)
+	self.am:call("on_key_hold", key, bind)
+end
+
+function actor_binder:item_to_belt(obj)
+	local sobj = alife():object(obj:id())
+	if sobj then
+		self.am:call("on_item_to_belt", obj, sobj)
+	end
+end
+
+function actor_binder:item_to_backpack(obj)
+	local sobj = alife():object(obj:id())
+	if sobj then
+		-- такое бывает, когда спавним в инвентарь предмет, а потом его тут же
+		-- удаляем ещё до выхода в онлайн
+		akill.check_actor_outfit()
+		akill.check_actor_armor()
+		self.am:call("on_item_to_ruck", obj, sobj)
+	end
+end
+
+function actor_binder:item_to_slot(obj)
+	local sobj = alife():object(obj:id())
+	if sobj then
+		akill.check_actor_outfit()
+		akill.check_actor_armor()
+		self.am:call("on_item_to_slot", obj, sobj)
+	end
+end
+
+function actor_binder:before_hit_callback(hit_data)
+	if self.object:has_info("actor_immortal") then hit_data.ignore_hit = true return end
+	local obj = level.object_by_id(hit_data.who_id)
+	if obj then -- если есть виновник хита
+
+		if obj:is_actor() and hit_data.hit_type == 2 then
+		local out = self.object:get_current_outfit()
+		if out and get_bool(out:section(), "no_hit_fall", false) then hit_data.ignore_hit = true return end
+	end
+
+		-- проверяем условия игнорирования урона от дружественного огня
+		if obj:id() ~= self.object:id() and obj:is_stalker() and obj:relation(self.object) ~= game_object.enemy then
+			local enemy = obj:best_enemy()
+			if (not enemy) or (enemy:id() ~= self.object:id()) then
+				-- подстрелил друг, игнорируем
+				hit_data.ignore_hit = true
+				-- log3("[%s]: ignore hit from %s", script_name(), obj:name())
+			end
+		end
+		if hit_data.weapon_id then
+			local wpn = level.object_by_id(hit_data.weapon_id)
+			if wpn and wpn:is_grenade() and obj:is_actor() then
+				hit_data.power = hit_data.power / 15
+			end
+		end
+	end
+	if not hit_data.ignore_hit then
+		self.am:call("on_actor_before_hit", self.object, hit_data)
+	end
+end
+
+function actor_binder:before_use(item)
+	if not item then return end
+	local sobj = alife():object(item:id())
+	if not sobj then return end
+	self.am:call("on_actor_before_use", item, sobj)
+end
+
+function actor_binder:on_cell_item_focus(obj)
+	self.am:call("on_cell_item_focus", obj)
+end
+
+function actor_binder:on_cell_item_focus_lost(obj)
+	self.am:call("on_cell_item_focus_lost", obj)
+end
+
+function actor_binder:on_cell_item_mouse(obj, x, y, action)
+	self.am:call("on_cell_item_mouse", obj, x, y, action)
+end
+
+function actor_binder:on_wheel_rotation(vol)
+	self.am:call("on_wheel_rotation", vol)
+end
+
+function actor_binder:on_select_item(obj)
+	local sobj = alife():object(obj:id())
+	if sobj then
+		self.am:call("on_select_item", obj, sobj)
+	end
+end
+
+function actor_binder:cell_item_create(item)
+	self.am:call("on_cell_item_create", item)
+end
+
+function actor_binder:on_actor_weapon_zoom_in(obj)
+	self.am:call("on_actor_weapon_zoom_in", obj)
+end
+
+function actor_binder:on_actor_weapon_zoom_out(obj)
+	self.am:call("on_actor_weapon_zoom_out", obj)
+end
+
+function actor_binder:on_actor_weapon_fire(obj)
+	self.am:call("on_actor_weapon_fire", obj)
+	MClientOnEvents.OnIFire(obj)
+	-- cp2ogsr: небольшой костыль для фикса РПГ-7
+	if obj:section() == "wpn_rpg7" then
+		obj:get_weapon():start_fire()
+		obj:get_weapon():stop_fire()
+	end
+end
+
+function actor_binder:on_actor_weapon_reload(obj)
+	MClientOnEvents.OnIReload(obj)
+	self.am:call("on_actor_weapon_reload", obj)
+end
+
+function actor_binder:on_actor_weapon_reload_jammed(obj)
+	MClientOnEvents.OnIReload2(obj)
+	self.am:call("on_actor_weapon_reload_jammed", obj)
+end
+
+function actor_binder:on_actor_weapon_reload_end(obj)
+	MClientOnEvents.OnIReloadEND(obj)
+	self.am:call("on_actor_weapon_reload_end", obj)
+end
+
+function actor_binder:on_footstep(obj)
+self.am:call("on_footstep", obj)
+end
+
+function actor_binder:on_actor_jump()
+	MClientOnEvents.OnIJump()
+	self.am:call("on_actor_jump")
+end
+
+function actor_binder:on_slot_activate()
+self.am:call("on_slot_activate")
+end
+
+function actor_binder:on_actor_land()
+self.am:call("on_actor_land")
+end
+
+
+function actor_binder:level_changer_action(obj, wnd)
+--- NEED TO FUCK CLIENT OF JOIN AREA. BREAK SCRIPTS FUCKING
+	local sobj = obj:get_alife_object()
+	local lc = sobj:get_level_changer()
+	local dest_vertex = lc.dest_game_vertex_id
+	local dest_lname = alife():level_name(game_graph():vertex(dest_vertex):level_id())
+	local msg_text_wnd = wnd:FindChild("message_box_change_level:message_text")
+	msg_text_wnd:GetCUIStatic():SetText(translate(dest_lname) .. "%c[default]: " .. translate("level_changer_invitation"))
+	self.am:call("on_level_changer_action", obj, wnd, dest_lname)
+	op2ogsr_items_animations.reset()
+end
+
+function actor_binder:actor_hit_callback(obj, amount, local_direction, who, bone_index)
+	self.am:call("on_hit", obj, amount, local_direction, who, bone_index)
+end
+
+function actor_binder:on_inv_box_put_item(box, item)
+	self.am:call("on_inv_box_put_item", box, item, alife():object(item:id()))
+end
+
+function actor_binder:on_throw_grenade(obj)
+	MClientOnEvents.OnIThrowGrenade(obj)
+	self.am:call("on_throw_grenade", obj)
+	if
+		level.name() == "l12_stancia_2" and has_info("stealth3_done") and
+		db.actor:position():distance_to(vector():set(-246.994735717773, -18.7829532623291, -134.143127441406)) < 5
+	then
+		if obj and no_hit_grnd[obj:section()] then return end
+		if not has_info("stealth_blow_sidor_have") then
+			give_info("stealth_blow_sidor_have")
+		end
+		log3("--[%s]: on_throw_grenade, stealth_blow_sidor_have done!", script_name())
+	end
+end
+
+function actor_binder:on_mouse_move(velx, vely)
+	self.am:call("on_mouse_move", velx, vely)
+end
+
+--------------------------------------------------------------------------------------------------------
+-------------------------------------------- OGSR CALLBACKS END ----------------------------------------
+--------------------------------------------------------------------------------------------------------
+
+function actor_binder:take_item_from_box(box, item)
+	if string.sub(item:section(), 1, 10) == "val_zapis_" then
+		valerich_treasures.spawn_next(tonumber(string.sub(item:section(), 11, -1)))
+	end
+
+	-- если калбек на взятие предмета из тайника поставить сюда, а не в on_item_take, то калбек сработает только один раз
+	-- и не будет вызываться каждый раз при лоаде, поэтому поршнем его отсекать не нужно
+	-- hotkeys.on_item_take(item)
+	fly.returner_clear_pos(item)
+	snp.check_treasure_item(item)
+	spawn_level_changer.on_take_teleportator(item)
+	braad_test.mina_band2(item)
+
+	local box_sect = box:section()
+	-- подъем рюкзаков
+	if box:is_inv_box_empty() and box:section() ~= "a_inventory_box60" then -- рюкзак говорящего контролера не трогать
+
+		treasure_manager.take_item_from_box(box, box:story_id())
+
+		if transparent_treasure.IsTaken(box_sect) or get_bool(box_sect, "bs.is_taken_box", false) then
+			level.start_stop_menu(level.main_input_receiver(), true)
+
+			-- здесь можно прописывать калбеки взятия на проверку по секции тайника, чтобы не придумывать уникальные предметы
+			snp.check_treasure(box)
+			archievements.check_treasure(box)
+			kostya_dialog.stealth_on_take(box)
+
+			release(box)
+			got_item("treasure_item")
+
+			-- cp2ogsr: выдать поршень при подборе рюкзака
+			local ip = get_string(box_sect, "bs.give_info")
+			if ip and not self.object:has_info(ip) then
+				self.object:give_info_portion(ip)
+			end
+		end
+
+		if box_sect ~= "m_inventory_box" then
+			archievements.acv_count_event("acv_sled", 300, "Следопыт")
+		end
+	end
+
+	--AMK UTILS--
+	amk.on_item_take_from_box(box, item)
+	amk_utils.actor_item_from_box(box, item)
+	--AMK UTILS--
+
+	self.am:call("on_take_from_box", box, item)
+end
+
+function actor_binder:level_border_enter(npc, info_id)
+	self.actor_detector:actor_enter()
+
+	--AMK UTILS--
+	amk_utils.actor_level_border_enter(npc, info_id)
+	--AMK UTILS--
+end
+
+function actor_binder:level_border_exit(npc, info_id)
+	self.actor_detector:actor_exit()
+
+	--AMK UTILS--
+	amk_utils.actor_level_border_exit(npc, info_id)
+	--AMK UTILS--
+end
+
+function actor_binder:info_callback(npc, info_id)
+	-- log3("~ *INFO*: npc='%s' id='%s'", npc:name(), info_id)
+
+	--' Сюжет
+	level_tasks.proceed(self.object)
+	-- Отметки на карте
+	archievements.on_info(info_id)
+	level_tasks.process_info_portion(info_id)
+
+	--AMK UTILS--
+	amk.on_info(npc, info_id)
+	amk_utils.actor_info(npc, info_id)
+	-- inventory.on_inventory_info(info_id)
+	-- hotkeys.on_info(info_id)
+	--AMK UTILS--
+	if npc:id() == db.actor:id() then
+		meceniy_spawn.respawn(info_id)
+	end
+	self.am:call("on_info", npc, info_id)
+	local sc = info2call[info_id]
+	if sc then self.am:call(sc, npc) end
+end
+
+function actor_binder:on_trade(item, sell_bye, money)
+	if sell_bye == true then
+		game_stats.money_trade_update(money)
+	else
+		if item:is_weapon_magazined() then
+			item:unload_magazine()
+		end
+		archievements.on_receive_count_item(item)
+		game_stats.money_trade_update(-money)
+	end
+	self.am:call("on_trade", item, sell_bye, money)
+	db.traded = true
+end
+
+function actor_binder:article_callback(npc, group, name, _type, art_text)
+	if device().precache_frame > 1 then return end
+
+	news_manager.send_encyclopedy(npc, group, name, _type)
+
+	--[=[
+	if group == "Diary" then
+		news_manager.send_encyclopedy("diary", group)
+	else
+		news_manager.send_encyclopedy("encyclopedy", group)
+	end
+	--]=]
+
+	--AMK UTILS--
+	amk.on_info(npc, info_id)
+	amk_utils.actor_article(npc, group, name)
+	--AMK UTILS--
+
+	-- op2.mylog(translate(name) .. "\\n" .. translate(group) .. "\\n" .. translate(art_text))
+
+	self.am:call("on_article", npc, group, name, _type)
+end
+
+function actor_binder:on_item_take(obj)
+	self.am:call("on_take_before_all", obj)
+	level_tasks.proceed(self.object)
+
+	--AMK UTILS--
+	amk.on_item_take(obj)
+	amk_utils.actor_item_take(obj)
+	sak.check_used_item(obj)
+	braad_test.checking_use_item(obj)
+	if xrs_ai then xrs_ai.actor_item_take(obj) end
+	art_hit.hit_by_art(obj)
+	self.am:call("on_checking_taken_item", obj)
+	--AMK UTILS--
+
+	if rx_ai then rx_ai.actor_item_take(obj) end
+
+	if obj:is_weapon_magazined() and self.object:is_talking() and not protected_items.not_unloaded_weapon(obj:section()) then obj:unload_magazine() end
+
+	-- должен в итоге быть монолитовцем при определенных условиях
+	snp.join_monolith()
+	local sobj = alife():object(obj:id())
+	if sobj then
+		self.am:call("on_take", obj, sobj)
+	end
+end
+
+function actor_binder:on_pickup(obj)
+	MClientOnEvents.OnIPickUpItem(obj)
+	local sobj = alife():object(obj:id())
+	self.am:call("on_pickup", obj, sobj)
+end
+
+function actor_binder:on_item_drop(obj)
+	self.am:call("on_drop_before_all", obj)
+	-- babah.li(obj)
+	level_tasks.proceed(self.object)
+	amk.on_item_drop(obj)
+	amk_utils.actor_item_drop(obj)
+	braad_test.drop_actor(obj)
+	braad_test.drop_lim(obj)
+	akill.check_actor_outfit()
+	akill.check_actor_armor()
+	-- snp.checking_dropped_item_snp(obj) -- snp
+	local sobj = alife():object(obj:id())
+	if sobj then
+		self.am:call("on_drop", obj, sobj)
+	end
+end
+
+function actor_binder:task_callback(_task, _objective, _state)
+	task_manager.task_callback(_task:get_id(), _objective:get_idx(), _state)
+	
+	if _objective:get_idx() == 0 then
+		if _state == task.fail then
+			if db.actor then give_info("acv_task_fail") end
+			news_manager.send_task(db.actor, "fail", _task, _objective)
+		elseif _state == task.completed then
+			task_manager.reward_by_task(_task)
+			news_manager.send_task(db.actor, "complete", _task, _objective)
+		else
+			news_manager.send_task(db.actor, "new", _task, _objective)
+		end
+	else
+		if _task:get_objective(0):get_state() == task.in_progress then
+			news_manager.send_task(db.actor, "update", _task, _objective)
+		end
+	end
+
+	--AMK UTILS--
+	amk_utils.actor_task(_task, _objective, _state)
+	--AMK UTILS--
+end
+
+function actor_binder:map_location_added_callback(spot_type_str, object_id)
+	if not spot_type_str or not object_id then return end
+	-- log3("~~[%s]: Actor_binder:map_location_added_callback: [%s], id: [%s]", script_name(), tostring(spot_type_str), tostring(object_id))
+	self.am:call("on_map_location_added_callback", spot_type_str, object_id)
+	if (false == app_ready()) or (device().precache_frame > 1) then return end
+end
+local update_was_never_called = true
+function actor_binder:update(delta)
+	if update_was_never_called then
+		self.am:call("on_before_first_update")
+		
+		--[[
+		if amk.has_timer("no_save") then
+			abort(translate("ui_st_first_update_warning"))
+		end
+		]]
+		
+		_G.flag_can_save = false
+		
+	end
+	self.am:call("on_before_update", delta)
+
+	self.time = time_global()
+	amk.oau_reason = "actor_binder:update"
+	object_binder.update(self, delta)
+
+	if self.bCheckStart then
+		db.money = self.object:money()
+		db.vbr = drrr.next_vbr()
+		
+		if not has_info("storyline_actor_start") and (level.name() == "l01_escape") then
+    	    self.am:call("on_storyline_actor_start")
+    	    self.object:give_info_portion("storyline_actor_start")
+    	    _G.g_start_avi = true
+        end
+
+		-- принудительное переодевание квестовиков
+		-- xrs_armor.redress()
+		
+		if not has_info("acv_giv") then
+			db.actor.no_load_time = amk.game_minutes() + 9 * 60
+		end
+		
+		self.bCheckStart = nil
+	end
+
+	fly.update()
+	fly.returner_update()
+	lootmoney.transfer_all_desired()
+	-- bind_monster.transfer_all_desired()
+	chess.update()
+
+	-- $DreamMod апдейт схемы сна
+	if sleep_manager.is_sleep_active() and xr_conditions.actor_dead() then
+		xr_logic.issue_event(db.actor, db.storage[db.actor:id()]["ar_sleep"], "update")
+	end
+	-- апдейт погоды
+	self.weather_manager:update()
+	-- апдейт схемы детектора
+	self.actor_detector:update()
+	-- xr_sound.update_actor()
+	-- meceniy_work.set_invisible()
+
+	-- Апдейт 1 сек.
+	if upd_time1 < self.time then
+		upd_time1 = self.time + 1000
+		-- arc_main.actor_update()
+		xr_sound.update_actor() -- cp2ogsr: это можно раз в секунду проверять
+		game_stats.update(delta, self.object)
+		meceniy_utils.on_actor_update_callback()
+		meceniy_work.mainw()
+		nano_suit_moduls.nano_update()
+		task_manager.actor_update()
+	end
+	-- ----------------------------------------------------- ARENA_EXTENSION_MOD--------------------------------------------------------
+	aem_manager.get_aem():update()
+	-- ----------------------------------------------------- ARENA_EXTENSION_MOD--------------------------------------------------------
+	-- Обновление отключения ввода с клавиатуры.
+	if self.st.disable_input_time ~= nil and game.get_game_time():diffSec(self.st.disable_input_time) >= self.st.disable_input_idle then
+		level.enable_input()
+		self.st.disable_input_time = nil
+	end
+	-- Обновление сна с переносом чувака в указанную позицию
+	if self.st.sleep_relocate_time ~= nil and game.get_game_time():diffSec(self.st.sleep_relocate_time) >= self.st.sleep_relocate_idle then
+		give_info("teleport_started")
+		self.object:set_actor_position(self.st.sleep_relocate_point)
+		local dir = self.st.sleep_relocate_point:sub(self.st.sleep_relocate_look)
+		self.object:set_actor_direction(dir:getH())
+		give_info("teleport_finished")
+		self.st.sleep_relocate_time = nil
+	end
+
+	-- обновление рестрикторов, которые под логикой, срабатывает через интервалы времени
+	if self.next_restrictors_update_time < self.time then
+		bind_restrictor.actor_update(delta)
+
+		-- Апдейтим наш телепорт (Kostya_level)
+		bind_mteleport.actor_update(delta)
+		self.next_restrictors_update_time = self.time + 200
+	end
+
+	self.update_cnt = self.update_cnt + 1
+	if self.update_cnt > 5 then
+		self.update_cnt = 1
+		if self.object:has_info("teleport_finished") then
+			disable_info("teleport_started")
+			disable_info("teleport_finished")
+		end
+	end
+
+	-- обновление постпроцессов
+	if post_process ~= 0 then
+		if post_process:update() == true then
+			post_process = 0
+		end
+	end
+
+	-- обновление пси-антенны
+	if sr_psy_antenna.psy_antenna then
+		sr_psy_antenna.psy_antenna:update(delta)
+	end
+
+	--AMK UTILS--
+	amk.on_actor_upade(delta)
+	--AMK UTILS--
+
+	if xrs_ai then xrs_ai.actor_update(delta) end
+	if rx_ai then rx_ai.actor_update() end
+	-- end of addition
+	-- biodetector.update()
+	-- stco.update()	-- cp2ogsr: перенесено на ogse_signals
+	-- transparent_treasure.update()	-- cp2ogsr: малозаметные тайники убраны
+
+	-- Апдейт 120 сек.
+	if upd_time2 < self.time then
+		upd_time2 = self.time + 120000
+		fly_island.check_code()
+		-- buusty_dialog.xo_repair_finished()
+	end
+
+	-- Апдейт 0.5 сек
+	if upd_time3 < self.time then
+		upd_time3 = self.time + 500
+		-- doc_viewer.update()
+		-- babah.update(delta)
+		-- marsh_radiation.update()
+		danger.enemy_calmdown()
+		-- lightning.strike_if_needed()
+	end
+	amk.oau_watchdog = 0
+	amk.oau_reason = ""
+
+	if update_was_never_called then
+		self.am:call("on_first_update")
+		
+		show_warning(translate("ui_st_save_warning_first_update"))
+		
+		amk.start_timer("no_save", 5)
+		
+		update_was_never_called = nil
+	end
+
+	--- SERVER SEND DATA. Сервер отправляет регулярные данные ---
+	if updMServer_time < self.time then
+		updMServer_time = self.time + 4000
+		MServer.UpdateAliveNPCS()
+	end
+	
+	--- CLIENT SEND DATA. Отправка данных на сервер с клиента ---
+	if updMClient_time < self.time then
+		updMClient_time = self.time + 300
+		MClient.SendMyActorInfo()
+	end
+
+	--- SERVER READ DATA. Чтение пакетов с сервера ---
+	MServer.ReadData()
+	MClient.ReadData()
+	self.am:call("on_update", delta)
+end
+
+function actor_binder:save(packet)
+	if amk.has_timer("no_save") then
+
+		dsh.timeout(2000, function()
+			local p = getFS():update_path("$game_saves$", alife().save_name)
+			getFS():file_delete(p)
+		end)
+
+		show_warning(translate("ui_st_save_warning"), 30000)
+		
+	end
+
+	-- проваливание заданий, во время которых нельзя сохраняться
+	esc_fly.sidor_delo_fail()
+
+	-- удаление запущенных варок перед сейвом
+	-- amk.remove_timer("af_transform_universal")
+
+	if not has_info("only_one_difficulty") then
+		give_info("acv_real_fail")
+	end
+
+	if not has_info("teleport_started") and utils.level_changing() then
+		archievements.acv_count_event("acv_skit", 300, "Скиталец")
+	end
+
+	if rx_ai then rx_ai.actor_save(packet) end
+
+	self:save_old(packet)
+
+	self.am:call("on_save", packet)
+	log3("[%s]: Actor save netpacket size: [%s]", script_name(), packet:w_tell())
+	-- dsh.timeout(1000, function() op2.print_size_info() end)
+	ASSERT(packet:w_tell() < 7500, "Actor netpacket size is critical: %s", tostring(packet:w_tell()))
+end
+
+function actor_binder:save_old(packet)
+	local save_treasure_manager = true
+
+	object_binder.save(self, packet)
+
+	--' Сохраняем уровень сложности
+	if save_treasure_manager == true then
+		packet:w_u8(level.get_game_difficulty() + 128)
+	else
+		packet:w_u8(level.get_game_difficulty())
+	end
+
+	--' Сохраняем данные об отключенном вводе
+	if self.st.disable_input_time == nil then
+		packet:w_bool(false)
+	else
+		packet:w_bool(true)
+		utils.w_CTime(packet, self.st.disable_input_time)
+	end
+	-- amk.oAmkLauncher:SaveData(self.object)
+
+	xr_logic.pstor_save_all(self.object, packet)
+	self.weather_manager:save(packet)
+
+	sr_psy_antenna.save(packet)
+
+	if save_treasure_manager == true then
+		treasure_manager.save(packet)
+	end
+
+	task_manager.save(packet)
+	self.actor_detector:save(packet)
+end
+
+local game_difficulty_by_num = {"gd_novice", "gd_stalker", "gd_veteran", "gd_master"}
+function actor_binder:load(reader)
+	object_binder.load(self, reader)
+
+	--' Загружаем уровень сложности
+	local game_difficulty = reader:r_u8()
+
+	local load_treasure_manager = false
+	if game_difficulty >= 128 then
+		game_difficulty = game_difficulty - 128
+		load_treasure_manager = true
+	end
+
+	cmd("g_game_difficulty " .. game_difficulty_by_num[game_difficulty + 1])
+	log1("**Game difficulty: " .. tostring(level.get_game_difficulty()))
+
+	if reader:r_eof() then
+		abort("Это сохранение необратимо повреждено - удалите его, и переиграйте с более раннего сохранения. Продолжать игру на этом сохранении категорически запрещено!")
+		string.format("%s")
+	end
+
+	local stored_input_time = reader:r_u8()
+	if stored_input_time == true then
+		self.st.disable_input_time = utils.r_CTime(reader)
+	end
+
+	xr_logic.pstor_load_all(self.object, reader)
+	-- amk.oAmkLauncher:LoadData(self.object)
+
+	self.weather_manager:load(reader)
+
+	sr_psy_antenna.load(reader)
+
+	if load_treasure_manager == true then
+		treasure_manager.load(reader)
+	end
+
+	task_manager.load(reader)
+	self.actor_detector:load(reader)
+
+	self.am:call("on_load", reader)
+
+	--[=[
+	if xr_logic.pstor_retrieve(self.object, "emerg", false) then -- нельзя использовать amk.load_varible(), так как db.actor ещё не определён
+		self.warning = true
+		self.critical = 2
+		self.wt = time_global() + 60000
+	end
+	--]=]
+	log3("[%s]: Actor netpacket load size: [%s]", script_name(), reader:r_tell())
+end
+
+function actor_binder:on_use_object(obj)
+	player_ogg.lose_item(obj)
+	kostya_dialog.peshera_drink(obj)
+	--zvuki.use_snd(obj)
+	archievements.on_use_item(obj)
+	-- meceniy_outfit.on_item_drop(obj)
+	fly.start(obj)
+	buusty_dialog.use_money(obj)
+	amk_mod.check_sleep_item(obj)
+	spawn_level_changer.checking_droped_obj(obj)
+	meceniy_utils.on_item_drop_callback(obj)
+	MClientOnEvents.OnIUseItem(obj)
+	local sobj = alife():object(obj:id())
+	if sobj then
+		self.am:call("on_use", obj, sobj)
+	end
+end
+
+local pw_timer
+local prev_slot
+local hidden = false
+local function process_weapon(hide)
+	if pw_timer then
+		pw_timer:stop()
+		pw_timer = nil
+	end
+	local outfit = db.actor:get_current_outfit()
+	if not hide and (not outfit or not hide_weapon_outfits[outfit:section()]) then 
+		db.actor:restore_weapon()
+		hidden = false
+		db.actor:activate_slot(prev_slot)
+		return
+	end
+	if hidden then return end
+	prev_slot = db.actor:active_slot()
+	pw_timer = dsh.wait_condition(
+		function()
+			db.actor:activate_slot(255)
+			return db.actor:active_slot() == 255
+		end,
+		function() 
+			db.actor:hide_weapon() 
+			pw_timer = nil 
+			hidden = true
+		end,
+		function() ogse_signals.get_mgr():reschedule(10) end
+	)
+end
+
+-- Weapon functions
+function hide_weapon()
+	MClientOnEvents.OnIShowedHideWeapon(true)
+	process_weapon(true)
+end
+function restore_weapon()
+	MClientOnEvents.OnIShowedHideWeapon(false)
+	process_weapon(false)
+end
+
+function has_traded()
+	if db.traded then
+		if db.actor:is_talking() then
+			db.actor:stop_talk()
+		end
+		db.traded = nil
+	end
+end
+
+function first_update_was_never_called()
+	return update_was_never_called
+end
+
+local hud = get_hud()
+function show_warning(text, delay)
+	if hud:GetCustomStatic("hud_save_warning") == nil then
+		hud:AddCustomStatic("hud_save_warning", true)
+	else
+		hud:RemoveCustomStatic("hud_save_warning")
+		hud:AddCustomStatic("hud_save_warning", true)
+	end
+	local message = hud:GetCustomStatic("hud_save_warning"):wnd()
+	message:SetText(text)
+	dsh.timeout(delay or 6000,
+		function()
+			if hud:GetCustomStatic("hud_save_warning") then
+				hud:RemoveCustomStatic("hud_save_warning")
+			end
+		end
+	)
+end

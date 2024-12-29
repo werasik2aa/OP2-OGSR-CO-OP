@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="windows-1251" ?>
+<string_table>
+	<string id="ui_mm_connect">
+		<text>Присоединиться</text>
+	</string>
+	<string id="ui_mm_nochange">
+		<text>Если вы уже вводили их. Повторно вводить не нужно. Вводите то, что хотите изменить</text>
+	</string>
+	<string id="mm_mp_host_port">
+		<text>Адресс сервера IP:Порт</text>
+	</string>
+	<string id="mm_mp_nickname">
+		<text>Имя пользователя</text>
+	</string>
+</string_table>

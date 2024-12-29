@@ -1,0 +1,79 @@
+Properties = nil
+SavesFolder = getFS():update_path("$game_saves$", "")
+MainFolder = getFS():update_path("$app_data_sroot$", "")
+DownloadsFolder = getFS():update_path("$app_data_sroot$", "Downloads")
+PlayerDataFolder = getFS():update_path("$app_data_sroot$", "PlayerDatas")
+
+function LoadProps()
+    local CFile = MainFolder.."Config.ini"
+    local props = {}
+    if file_exists(CFile) then
+        for line in io.lines(CFile) do
+            local prop = popit(line, "=")
+            props[tostring(prop[1])] = tostring(prop[2])
+        end
+    else
+        log1("[ConfigManager] Зачем вы удалили конфиг файл. Его путь > "..CFile)
+    end
+    return props
+end
+
+function WriteProp(what, val)
+    if not Properties then
+        log1("[ConfigManager] Properties => nil. Читаем снова.")
+        Properties = LoadProps()
+    end
+    local CFile = MainFolder.."Config.ini"
+    local file = io.open(CFile, "w")
+    Properties[what] = val
+    WriteProps()
+end
+
+function WriteProps()
+    local CFile = MainFolder.."Config.ini"
+    local file = io.open(CFile, "w")
+    for k, v in pairs(Properties) do
+        file:write(tostring(k).."="..tostring(v))
+        file:write("\n")
+    end
+    file:close()
+end
+
+function MSaveGame(doitname)
+end
+
+function popit(inputstr, sep)
+   if sep == nil then
+      sep = "%s"
+   end
+   local t={}
+   for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
+      table.insert(t, str)
+   end
+   return t
+end
+
+function file_exists(name) --Более нормального способа проверить существование файла, в lua вроде бы нет.
+	local f = io.open(name, "r")
+	if f then
+		f:close()
+		return true
+	end
+	return false
+end
+
+function ReadValue(ms, type)
+    if not Properties then 
+        log1("[ConfigManager] Properties => nil. Читаем снова.")
+        Properties = LoadProps() 
+    end
+    if not Properties[ms] then
+        log1("[ConfigManager] Ключ " .. ms .. " отсутствует в списке настроек")
+        return ""
+    end
+    if type == 0 then
+        return tostring(Properties[ms])
+    elseif type == 1 then
+        return tonumber(Properties[ms])
+    end
+end

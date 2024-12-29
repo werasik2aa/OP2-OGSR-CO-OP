@@ -1,0 +1,38 @@
+class "MClientCalls"
+-- Сюда я кладу временные вещи.
+-- Обновление локальной информации.
+function UpdatePlayerData(CLID, ShortPlData)
+	if MClient.SpawnedPlayers[CLID] ~= nil then
+		MClient.SpawnedPlayers[CLID].MainInfo.AreaID = ShortPlData.AreaID
+		MClient.SpawnedPlayers[CLID].MainInfo.AreaID2 = ShortPlData.AreaID2
+		MClient.SpawnedPlayers[CLID].MainInfo.Position = ShortPlData.Position
+		MClient.SpawnedPlayers[CLID].MainInfo.Rotation = ShortPlData.Rotation
+		MClient.SpawnedPlayers[CLID].MainInfo.Gun = ShortPlData.Gun
+		MClient.SpawnedPlayers[CLID].MainInfo.Outfit = ShortPlData.Outfit
+		MClient.SpawnedPlayers[CLID].MainInfo.MoveType = ShortPlData.MoveType
+	end
+end
+
+-- Телепорт функция. Модификация стандартной. Но для разных типов структуры позиций
+function Teleport(npc, gamepos, lv, gv)
+	gamepos = MMPDefs.ConvertToVector(gamepos)
+	if npc and gamepos and lv and gv then
+		if type(npc) ~= "number" then
+			if type(npc.id) == "number" then
+				alife():teleport_object(npc.id, gamepos, lv, gv)
+			elseif npc:id() then
+				alife():teleport_object(npc:id(), gamepos, lv, gv)
+			else 
+				log1("[Client] Такой НПС не найден или сдох нахуй. Странно да?")
+			end
+		else
+			if alife():object(npc) then
+				alife():teleport_object(npc, gamepos, lv, gv)
+			else
+				log1("[Client] НПС с таким ID не найден или сдох нахуй. Укажите другой?")
+			end
+		end
+	else 
+		log1("[Client] Выполнение, телепорта не возможно. Переданы nil значения")
+	end
+end

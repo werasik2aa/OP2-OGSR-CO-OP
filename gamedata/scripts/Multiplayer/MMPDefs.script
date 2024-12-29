@@ -1,0 +1,163 @@
+class "MMPDefs"
+
+-- CLIENT ret
+RET_CONNECTION_BEGIN = 0
+RET_CONNECTION_END = 1
+RET_SERVER_INFO = 2
+RET_SERVER_GAMEINFO = 3
+RET_SERVER_SAVE = 42
+RET_INVENTORY_DATA = 44
+
+-- CLIENT snd
+SND_PLAYER_INFO = 4
+SND_QUEST_COMPLETED = 5
+SND_QUEST_UPDATED = 6
+SND_QUEST_ADDED = 7
+SND_DOOR_OPENACTION = 8
+SND_JUMP_ACTION = 9
+SND_CROUCH_ACTION = 10
+SND_FIRE_ACTION = 11
+SND_RELOAD_ACTION = 12
+SND_RELOAD_ACTION2 = 13
+SND_RELOAD_ACTION_END = 14
+SND_HP_CHANGED = 15
+SND_EXECUTE_ANIMATION = 16
+SND_I_DEAD = 17
+SND_E_DEAD = 33
+SND_THROW_GRENADE = 18
+SND_ITEM_CONTAINER_TAKEN = 19
+SND_TAKEN_CONTAINER = 20
+SND_ITEM_DROPED = 21
+SND_ITEM_PICKUP = 22
+SND_ITEM_TAKE = 32
+SND_ITEM_USE = 34
+SND_WEAPON_SHOWEDSTATE = 23
+SND_PLAYER_DATA = 31
+SND_GIVE_INFO_PORTION = 36
+SND_INVENTORY_DATA = 37
+SND_I_DISCONNECTED = 43
+-------==============-------
+
+-- SERVER SND
+SND_SERVER_INFO = 24
+--SND_PLAYER_INFO
+SND_ENTITY_INFO = 38
+SND_ENTITY_DATA = 26
+SND_ENTITY_HITDATA = 35
+SND_ENTITY_DEAD = 27
+SND_ENTITY_SPAWNED = 28
+SND_QUEST_DATA = 29
+SND_YOU_DEAD = 30
+SND_SERVER_SAVE = 40
+SND_SPAWNER_DATA = 41
+
+-- SOME CONVERTORS
+function GetActorState()
+	local act = get_actor_obj()
+	local m = 0
+	if act:is_actor_walking() then -- РёРґС‘С‚ РјРµРґР»РµРЅРЅС‹Рј С€Р°РіРѕРј
+		m = 1
+	elseif act:is_actor_running() then -- РёРґС‘С‚ С€Р°РіРѕРј
+		m = 2
+	elseif act:is_actor_sprinting() then -- Р±РµР¶РёС‚
+		m = 3
+	elseif act:is_actor_crouching() then -- РёРґС‘С‚ РІ РїРѕР»СѓРїСЂРёСЃСЏРґРё
+		m = 4
+	elseif act:is_actor_creeping() then -- РёРґС‘С‚ РІ РїРѕР»РЅРѕРј РїСЂРёСЃСЏРґРµ
+		m = 5
+	elseif act:is_actor_climbing() then -- РїРѕРґРЅРёРјР°РµС‚СЃСЏ РїРѕ Р»РµСЃС‚РЅРёС†Рµ
+		m = 6
+	end
+	return m
+end
+
+function IsMYOnlinePlayer(IDNPC)
+	for kidp, data in pairs(MClient.SpawnedPlayers) do
+		if data.NPC == IDNPC then return true end
+	end
+	return false
+end
+
+function ConvertToVector(retpos)
+	if retpos ~= nil then
+		if retpos.X then
+			retpos = vector():set(retpos.X, retpos.Y, retpos.Z)
+		elseif not retpos.x then
+			log1("[MMPDefs] Невозможно превратить данный объект в сложный вектор")
+		end
+	else
+		log1("[MMPDefs] Невозможно превратить nil в сложный вектор")
+	end
+	return retpos
+end
+
+function ConvertToSVector(retpos)
+	if retpos ~= nil then
+		if retpos.x then
+			retpos = { X = retpos.x, Y = retpos.y, Z = retpos.z }
+		elseif not retpos.X then
+			log1("[MMPDefs] Невозможно превратить данный объект в простой вектор")
+		end
+	else
+		log1("[MMPDefs] Невозможно превратить nil в простой вектор")
+	end
+	return retpos
+end
+
+function Distance(pos1, pos2)
+	pos1 = ConvertToVector(pos1)
+	pos2 = ConvertToVector(pos2)
+	return pos1:distance_to(pos2)
+end
+
+function ReadEntityData(obj)
+	if obj and type(obj) ~= "number" then
+		if type(obj.id) ~= "number" then
+			return {
+				id = obj:id(),
+				name = obj:name(),
+				section = obj:section(),
+				position = ConvertToSVector(obj:position()),
+				AreaID2 = obj:game_vertex_id(), 
+				AreaID = obj:level_vertex_id(),
+				direction = ConvertToSVector(obj:direction()),
+				bstate = obj:body_state(),
+				story_id = obj:story_id()
+			}
+		else
+			return {
+				id = obj.id,
+				name = obj.name,
+				section = obj.section,
+				position = ConvertToSVector(obj.position),
+				AreaID2 = obj.m_game_vertex_id,
+				AreaID = obj.m_level_vertex_id,
+				direction = ConvertToSVector(obj.direction)
+			}
+		end
+	else
+		log1("[MMPDefs] not implement")
+	end
+	return { id = 0 }
+end
+
+function GetDirection(pos1, pos2)
+	pos1 = ConvertToVector(pos1)
+	pos2 = ConvertToVector(pos2)
+	return pos1:sub(pos2)
+end
+
+function ReadFileBytes(fileName)
+	local inp = assert(io.open(fileName, "rb"))
+    local data = inp:read("*all")
+	inp:close() 
+	return data
+end
+
+function GetLength(itada)
+    local n = 0
+    for _ in pairs(itada) do
+        n = n + 1
+    end
+    return n
+end

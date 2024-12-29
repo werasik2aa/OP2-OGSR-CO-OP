@@ -1,0 +1,377 @@
+class "MServer"
+isHost = false
+local Server = {}
+local ServeredPort = 8080
+local ServeredDDR = {}
+local PlayerRulerPort = 0
+local TestLocalClient = false
+ConnectedClients = {}
+QuestsData = {}
+InfoPortionsExecuted = {}
+
+function CreateServer()
+	if ConfigManager.ReadValue("CREATESERVER", 1) == 0 then return end
+	local port = ConfigManager.ReadValue("PORT", 1)
+	if not isHost then
+		ServeredDDR = Socketier.find_first_address("*", port)
+		ServeredPort = port
+		
+		Server = assert(Socketier.create("inet", "dgram", "udp"))
+		assert(Server:set_blocking(false))
+		assert(Server:bind(ServeredDDR))
+		
+		isHost = true
+		log1("[Server] Servering at " .. ServeredDDR:get_ip() .. " " .. ServeredDDR:get_port())
+		if db.actor then
+			news_manager.send_tip(db.actor, "Сервер создан. IP: " .. ServeredDDR:get_ip() .. " Port:" .. ServeredDDR:get_port(), nil, "nano", 20000)
+		end
+	end
+end
+
+-- Основная функция отправки пиздюков которые теряются на проводе
+function SendData(data, addr)
+	if isHost then
+		Server:send_to(addr, data)
+	end
+end
+
+-- Отправка данных всем. addr адресс исключения. TestLocalClient - не исключать свой клиент.
+-- Также addr может быть портом исколючения
+function SendDataToAll(data, addr)
+	if isHost and addr then
+		for RemotePort, verda in pairs(ConnectedClients) do
+			if type(addr) ~= "number" then
+				if TestLocalClient or addr:get_port() ~= RemotePort then
+					SendData(data, Socketier.find_first_address(verda.EndP, RemotePort))
+				end
+			else
+				if TestLocalClient or addr ~= RemotePort then
+					SendData(data, Socketier.find_first_address(verda.EndP, RemotePort))
+				end
+			end
+		end
+	end
+end
+-- Управляет полученными пакетами
+function ReadData()
+	if isHost then
+		local data, EPClient = Server:receive_from()
+		if data then
+			local Part1 = iSerializer.deserialize(data, 1)[1]
+			if not Part1 then 
+				log1("[Server] Тип пакета расшифровать не получилось. Возможно подключение к не верному серверу")
+				return 
+			end
+			local Part2 = iSerializer.deserialize(data, 2)[1]
+			if not Part2 then log1("[Server] Пакет типа: "..tostring(Part1).." не имеет данных. Это ошибка?") end
+			--log1("[INFO][ServerRCV] Port: " .. tostring(Part1))
+			PacketManager(Part1, Part2, EPClient)
+		end
+	end
+end
+
+function PacketManager(paktype, pertarberk, fromEP)
+	if paktype == MMPDefs.RET_CONNECTION_BEGIN then
+		log1("[Server] Появился запрос на подключение... Отправляем информацию...")
+		local DINFO = {
+			Name = "FUCKING SERVER",
+			MaxPlayer = 10,
+			CurPlayers = GetCurrentPlayers(),
+			RetType = pertarberk
+		}
+		if pertarberk == 1 then
+			ConnectedClients[fromEP:get_port()] = 
+			{
+				EndP = fromEP:get_ip(),
+				SavedData = { }
+			}
+		end
+		SendData(iSerializer.serialize(MMPDefs.SND_SERVER_INFO, 0, DINFO), fromEP)
+	elseif paktype == MMPDefs.RET_SERVER_GAMEINFO then
+		log1("[Server] Client request, RESENDED player info AND all entity info")
+		-- TODO: проверка если я единственный игрок.
+		-- Также запрос у игрока всех данных на том или другом уровне дистанционно
+		local gid = GetIDByAddr(fromEP)
+		if gid ~= 0 then
+			SendAllPlayerDatas(fromEP)
+			--SendAllQuestions(fromEP)
+			SendNPCLevelData(fromEP)
+		end
+	elseif paktype == MMPDefs.RET_SERVER_SAVE then
+		SendSaveFile(fromEP)
+	elseif paktype == MMPDefs.SND_PLAYER_INFO then
+		ConnectedClients[fromEP:get_port()].SavedData = pertarberk
+		log1("[Server] === JOINED TO SERVER ===")
+		log1("[Server] NickName: "..tostring(pertarberk.Name))
+		log1("[Server] ID: "..tostring(pertarberk.ID))
+		log1("[Server] Level VertexID: "..tostring(pertarberk.AreaID))
+		log1("[Server] Game Level VertexID: "..tostring(pertarberk.AreaID2))
+		log1("[Server] HP: "..tostring(pertarberk.HP))
+		log1("[Server] Position: "..tostring(pertarberk.Position.X) .. " " .. tostring(pertarberk.Position.Y).. " " .. tostring(pertarberk.Position.Z))
+		log1("[Server] === ---------------- ===")
+		log1("[Server] Contains players " .. tostring(GetCurrentPlayers()))
+		if pertarberk.ID == 0 then
+			PlayerRulerPort = fromEP:get_port()
+		end
+		-- Рассылаем другим игрокам, что игрок подключился
+		SendDataToAll(iSerializer.serialize(MMPDefs.SND_PLAYER_INFO, GetIDByAddr(fromEP), pertarberk), fromEP)
+		return
+	elseif paktype == MMPDefs.SND_INVENTORY_DATA then
+		-- Сохраняем данные инвентаря. Нужно для передачи.
+		-- TODO: Сделать нормальную отправку если инвентарь выходит за пределы пакетов 65300 (Макс 65535)
+		local nick = GetNickByAddr(fromEP)
+		-- Здесь сохранение инвентаря на сервере
+		if nick then
+			log1("[Server] Обрабатываем полученную информацию инвентаря")
+			local fpth = ConfigManager.PlayerDataFolder.."\\"..nick..".data"
+			local filew = io.open(fpth, "wb")
+			filew:write(iSerializer.serialize(pertarberk))
+			filew:close()
+		else
+			log1("[Server] Не удаллсь получить ник игрока. Если это сообщение выходит слишком часто. Игрок обязан переподключится!")
+			log1("[Server] Игрок порт: "..tostring(fromEP:get_port()))
+		end
+		return
+	elseif paktype == MMPDefs.SND_PLAYER_DATA then
+		-- Для передачи инфы игроку. Чтобы не появлялся далеко за картой, отключается npc и лагает
+		if ConnectedClients[fromEP:get_port()] and ConnectedClients[fromEP:get_port()].SavedData then
+			ConnectedClients[fromEP:get_port()].SavedData.AreaID = pertarberk.AreaID
+			ConnectedClients[fromEP:get_port()].SavedData.AreaID2 = pertarberk.AreaID2
+			ConnectedClients[fromEP:get_port()].SavedData.Position = pertarberk.Position
+			ConnectedClients[fromEP:get_port()].SavedData.Rotation = pertarberk.Rotation
+			ConnectedClients[fromEP:get_port()].SavedData.Gun = pertarberk.Gun
+			ConnectedClients[fromEP:get_port()].SavedData.Outfit = pertarberk.Outfit
+			ConnectedClients[fromEP:get_port()].SavedData.MoveType = pertarberk.MoveType
+		end
+		SendDataToAll(iSerializer.serialize(MMPDefs.SND_PLAYER_DATA, GetIDByAddr(fromEP), pertarberk), fromEP)
+		return
+	elseif paktype == MMPDefs.SND_I_DISCONNECTED then
+		local idasf = GetIDByAddr(fromEP)
+		log1("[Server] Игрок с ID: "..tostring(idasf).." Отключился")
+		if ConnectedClients[fromEP:get_port()] then
+			ConnectedClients[fromEP:get_port()] = nil
+		end
+		SendDataToAll(iSerializer.serialize(MMPDefs.SND_I_DISCONNECTED, idasf, pertarberk), fromEP)
+		return
+	elseif paktype == MMPDefs.RET_INVENTORY_DATA then
+		nick = GetNickByAddr(fromEP)
+		id = GetIDByAddr(fromEP)
+		if nick and id then
+			log1("[Server] Отсылаем данные игрока клиенту.")
+			SendInventoryData(fromEP, id, nick)
+		else
+			log1("[Client] Данный ник на сервере не зарегистрирован... Пакет пришел слишком рано")
+		end
+		return
+	end
+
+	-- Остальные пакеты не имеют смысла разделять. Либо ещё не пришло время их разделять
+	-- TODO: Пакеты выполнения скрипта. Например спавн мобов. Или запуск тупых звуков. Для продвижения по квесту ...
+	SendDataToAll(iSerializer.serialize(paktype, GetIDByAddr(fromEP), pertarberk), fromEP)
+end
+
+function GetIDByAddr(addr)
+	if addr ~= nil then
+		if ConnectedClients[addr:get_port()] ~= nil then
+			return ConnectedClients[addr:get_port()].SavedData.ID
+		end
+	end
+	return -1
+end
+
+function GetCurrentPlayers()
+    return MMPDefs.GetLength(ConnectedClients)
+end
+
+-- Ограничение в 100 просто потому, что пакеты теряются
+-- Сделать проверку вокруг других игроков кроме сервера.
+function UpdateAliveNPCS()
+	if not isHost then return end
+	local LevelPak = {}
+	local count = 0
+	for id, npcda in alife():objects() do
+		if not MClientEntityManager.IsItPlayer(id) and id ~= db.actor:id() then
+			npc = level.object_by_id(npcda.id)
+			local mdata = {}
+			if npcda and npc and (IAmAStalker[npc:clsid()] or IAmAMonster[npc:clsid()]) then
+				if count >= 20 then
+					log1("[HostClient] ПЕРЕПОЛНЕНИЕ! Отправка собранной информации об онлайновых объектах")
+					SendDataToAll(iSerializer.serialize(MMPDefs.SND_ENTITY_DATA, 0, LevelPak), PlayerRulerPort)
+					LevelPak = {}
+					count = 0
+				end
+				
+				if IAmAStalker[npcda:clsid()] then
+					mdata.ObjType = 1
+					mdata.isDead = not npc:alive()
+					target = npc:best_enemy()
+				elseif IAmAMonster[npcda:clsid()] then
+					mdata.ObjType = 2
+					mdata.isDead = not npc:alive()
+					target = npc:best_enemy()
+				else
+					mdata.ObjType = 0
+					mdata.isDead = true
+				end
+				mdata.Rotation = MMPDefs.ConvertToSVector(npc:direction())
+				mdata.Position = MMPDefs.ConvertToSVector(npc:position())
+				-- target Добавил в норм место. Краши
+				if target then -- Нпс идёт на врага или просто кудато отправить
+					mdata.Position = MMPDefs.ConvertToSVector(npc:position())
+					mdata.AreaID = target:level_vertex_id()
+					mdata.AreaID2 = target:game_vertex_id()
+					npc:set_dest_level_vertex_id(mdata.AreaID)
+				else
+					mdata.AreaID = npc:level_vertex_id()
+					mdata.AreaID2 = npc:game_vertex_id()
+					mdata.Position = MMPDefs.ConvertToSVector(level.vertex_position(mdata.AreaID))
+				end
+				mdata.Section = npc:section()
+				LevelPak[npc:id()] = mdata
+			end
+		end
+	end
+	SendDataToAll(iSerializer.serialize(MMPDefs.SND_ENTITY_DATA, 0, LevelPak), PlayerRulerPort)
+end
+
+function SendNPCLevelData(fromEP)
+	local LevelPak = {}
+	local count = 0
+	log1("[HostClient] Собираем информацию об объектах")
+	for id, npcad in alife():objects() do
+		npcda = level.object_by_id(id)
+		-- npcda:alive(). Нам не нужно отправлять говно всякое. Пока не нужно
+		if npcda and npcad and not MClientEntityManager.IsItPlayer(id) and id ~= db.actor:id() and (npcda:alive() or npcda:section() == "respawn") then
+			local mdata = {}
+			if count >= 100 then
+				log1("[HostClient] ПЕРЕПОЛНЕНИЕ! Отправка собранной информации об онлайновых объектах")
+				SendData(iSerializer.serialize(MMPDefs.SND_ENTITY_INFO, 0, LevelPak), fromEP)
+				LevelPak = {}
+				count = 0
+			end
+			if IAmAStalker[npcda:clsid()] then
+				log1("[Server] Собираем информацию о сталкере..")
+				mdata.Params = amk.read_stalker_params(npcad)
+				mdata.ObjType = 1
+				mdata.isDead = not npcda:alive()
+				-- инфа о сталкере
+			elseif IAmAMonster[npcda:clsid()] then
+				log1("[Server] Собираем информацию о монстре...")
+				mdata.Params = amk.read_monster_params(npcad)
+				mdata.ObjType = 2
+				mdata.isDead = not npcda:alive()
+				-- инфа о монстре
+			elseif npcda:section() == "respawn" then
+				--log1("[Server] Собираем информацию о спавнере...")
+				--mdata.Params = amk.get_spawner_data(npcad)
+				--mdata.ObjType = 3
+				--mdata.isDead = false
+				-- инфа о спавнере
+			else
+				mdata.ObjType = 0
+				mdata.isDead = true
+				-- Просто чтобы не спавнилось при принятии клиентом.
+				-- Не решил что делать дальше
+			end
+			mdata.Position = MMPDefs.ConvertToSVector(npcda:position())
+			mdata.Rotation = MMPDefs.ConvertToSVector(npcda:direction())
+			mdata.AreaID = npcda:level_vertex_id()
+			mdata.AreaID2 = npcda:game_vertex_id()
+			mdata.Section = npcda:section()
+			LevelPak[id] = mdata
+			count = count + 1
+		end
+	end
+	log1("[HostClient] Отправка остаточной информации")
+	SendData(iSerializer.serialize(MMPDefs.SND_ENTITY_INFO, 0, LevelPak), fromEP)
+	LevelPak = { DONE = 1 }
+	SendData(iSerializer.serialize(MMPDefs.SND_ENTITY_INFO, 0, LevelPak), fromEP)
+end
+
+-- Выключить сервер
+function CloseServer()
+	if Server and isHost then
+		SendData(iSerializer.serialize(MMPDefs.SND_I_DISCONNECTED, 0, 0))
+		Server:close()
+		ConnectedClients = nil
+		QuestsData = nil
+		Server = nil
+		InfoPortionsExecuted = nil
+	end
+end
+
+function SendAllPlayerDatas(fromEP)
+	for UselessPort, vDA in pairs(ConnectedClients) do
+		if fromEP:get_port() ~= UselessPort then
+			SendData(iSerializer.serialize(MMPDefs.SND_PLAYER_INFO, vDA.SavedData.ID, vDA.SavedData), fromEP)
+		end
+	end
+end
+
+function SendAllQuestions(fromEP)
+	for id, iportion in pairs(QuestsData) do
+		SendData(iSerializer.serialize(MMPDefs.SND_QUEST_DATA, 0, iportion), fromEP)
+	end
+	for id, iportion in pairs(InfoPortionsExecuted) do
+		SendData(iSerializer.serialize(MMPDefs.SND_GIVE_INFO_PORTION, 0, iportion), fromEP)
+	end
+end
+
+-- Отправляет файл сохранения. Нужно сделать возможность отправки его сразу нескольким клиентам.
+local fileopn = nil
+function SendSaveFile(fromEP)
+	if not fileopn then
+		log1("[Server] Ищем последнее сохранение...")
+		local flist = getFS():file_list_open_ex( "$game_saves$", FS.FS_ListFiles + FS.FS_ClampExt + FS.FS_RootOnly + FS.FS_NoLower, "*.sav")
+		flist:Sort(FS.FS_sort_by_modif_down)
+		local fileName = getFS():update_path("$game_saves$", flist:GetAt(0):NameFull()..".sav")
+		log1("[Server] Отправляем сохранение клиенту: "..fileName)
+		fileopn = assert(io.open(fileName, 'rb'))
+		SendData(iSerializer.serialize(MMPDefs.SND_SERVER_SAVE, 0, { Status = 0 }), fromEP)
+		return
+	end
+
+	local str = fileopn:read(32000) -- Ну чтобы быстрее было пошел в жопу
+	-- Отправляем конец. Или же продолжаем посылать часть файла
+	if not str then
+		fileopn:close()
+		fileopn = nil
+		log1("[Server] Отправлено сохранение. Отправляем пакет готовности")
+		SendData(iSerializer.serialize(MMPDefs.SND_SERVER_SAVE, 0, { Status = 2 }), fromEP)
+	else
+		SendData(iSerializer.serialize(MMPDefs.SND_SERVER_SAVE, 0, { Status = 1, data = str}), fromEP)
+	end
+end
+-- Ник по айди
+function GetNickByID(retid)
+	for id, iportion in pairs(ConnectedClients) do
+		if id == retid then return iportion.SavedData.Name end
+	end
+	return "Fail_ID_"..tostring(retid)
+end
+
+function GetNickByAddr(fromEP)
+	if ConnectedClients[fromEP:get_port()] and ConnectedClients[fromEP:get_port()].SavedData then
+		return ConnectedClients[fromEP:get_port()].SavedData.Name
+	end
+	return "Fail_CLIENT_"..fromEP:get_port()
+end
+
+-- Отправляем инвентарь данного клиента. Если есть.
+-- Здесь передаётся сохранение инвентаря
+-- Сериализованные ДАННЫЕ!
+-- TODO: Очистить. И отправить чистый инвентарь, ну не прям чистый.
+function SendInventoryData(fromEP, id, nick)
+	local fpth = ConfigManager.PlayerDataFolder.."\\"..nick..".data"
+	if ConfigManager.file_exists(fpth) then
+		log1("[Server] Отправляем данные инвентаря игроку из файла: "..fpth)
+	else
+		log1("[Server] Данный игрок впервые подключился. Нет данных с его инвентарём")
+		fpth = ConfigManager.MainFolder.."\\Default.data"
+		log1("[Server] Отправляем пустой пакет файл: "..fpth)
+	end
+	local filer = io.open(fpth, "rb")
+	local pakets = filer:read("*all")
+	filer:close()
+	SendData(iSerializer.serialize(MMPDefs.SND_INVENTORY_DATA, id, pakets), fromEP)
+end

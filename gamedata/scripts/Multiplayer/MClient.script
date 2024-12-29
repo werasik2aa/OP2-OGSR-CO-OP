@@ -1,0 +1,316 @@
+class "MClient"
+local Client = {}
+local ConnectedPort = 8080
+local BlockInvetorySend = true
+SpawnedPlayers = {}
+isClient = false
+MyID = 0
+MyName = nil
+local ConnectedDDR = {}
+FileWritter = {}
+AllowSpawner = false
+TempFileWritter = {}
+WaitMe = false
+function ConnectToServer()
+	if ConfigManager.ReadValue("CONNECTOSERVER", 1) == 0 then return end
+	local ip = ConfigManager.ReadValue("IP", 0)
+	local port = ConfigManager.ReadValue("PORT", 1)
+	-- Если мы хост то айпи локальный
+	if MServer.isHost then
+		ip = "127.0.0.1"
+	end
+	if not isClient then
+		log1("[Client] Подключение к серверу > " .. ip .. ":" .. tostring(port) .. " < ...")
+		ConnectedPort = port
+		ConnectedDDR = Socketier.find_first_address(ip, port)
+
+		Client = assert(Socketier.create("inet", "dgram", "udp"))
+		assert(Client:set_blocking(false))
+		assert(Client:connect(ConnectedDDR, "udp"))
+
+		news_manager.send_tip(db.actor, "Идет подключение к серверу", nil, "nano", 20000)
+		if Client and Client:is_connected() then
+			isClient = true
+			SendData(iSerializer.serialize(MMPDefs.RET_CONNECTION_BEGIN, 1))
+		end
+	end
+end
+
+function ConnectAndGetServerFile()
+	local ip = ConfigManager.ReadValue("IP", 0)
+	local port = ConfigManager.ReadValue("PORT", 1)
+	if Client and isClient and Client:is_connected() then MClient.CloseConnection() end
+	if not isClient then
+		log1("[Client] Подключение к серверу > " .. ip .. ":" .. tostring(port) .. " < ...")
+		ConnectedPort = port
+		ConnectedDDR = Socketier.find_first_address(ip, port)
+
+		Client = assert(Socketier.create("inet", "dgram", "udp"))
+		assert(Client:set_blocking(false))
+		assert(Client:connect(ConnectedDDR, "udp"))
+		if Client:is_connected() then
+			isClient = true
+			log1("[Client] Запрос сохранения с сервера")
+			SendData(iSerializer.serialize(MMPDefs.RET_CONNECTION_BEGIN, 0))
+		end
+	end
+end
+
+function SendData(data)
+	if isClient and Client and Client:is_connected() then
+		assert(Client:send(data))
+	end
+end
+
+function ReadData()
+	if isClient and Client and Client:is_connected() then
+		local data, err = Client:receive()
+		if data and not err then
+			local PacketTypeNum = iSerializer.deserialize(data, 1)[1]
+			local ClientID = iSerializer.deserialize(data, 2)[1]
+			local DataDec = iSerializer.deserialize(data, 3)[1]
+			--log1("[Client] PacketType: " .. tostring(PacketTypeNum).. " From: " .. tostring(ClientID))
+			PacketManager(PacketTypeNum, ClientID, DataDec)
+		end
+		MClientPlayerManager.UpdatePlayerDatas()
+	end
+end
+function PacketManager(paktype, clid, pertubator)
+	-- Стадия 1 запрос Информации с сервера. Затем сохранение с сервера
+	if paktype == MMPDefs.SND_SERVER_INFO then
+		if pertubator.Name then
+			log1("[Client] === RCV SERVER INFO ===")
+			log1("[Client] ServerName: " .. pertubator.Name)
+			log1("[Client] MaxPlayers: " .. tostring(pertubator.MaxPlayer))
+			log1("[Client] CurPlayers: " .. tostring(pertubator.CurPlayers))
+			MyID = pertubator.CurPlayers
+			if pertubator.RetType == 1 then
+				news_manager.send_tip(db.actor, "Получена информация. Имя сервера: ".. pertubator.Name .. " игроки: " .. tostring(pertubator.CurPlayers) .. "/" .. tostring(pertubator.MaxPlayer), nil, "nano", 20000)
+				MClientOnEvents.OnConnectSuccess()
+			else
+				log1("[Client] Запрашиваем сохранение")
+				SendData(iSerializer.serialize(MMPDefs.RET_SERVER_SAVE, 0))
+			end
+		else
+			log1("[Client] Чё за хуйня пришла. Ты ебантяй")
+		end
+	elseif paktype == MMPDefs.SND_PLAYER_INFO then
+		log1("[Client] === FOUND NEW DATA ===")
+		log1("[Client] NickName: "..tostring(pertubator.Name))
+		log1("[Client] TemplateName: "..tostring(pertubator.TemplateName))
+		log1("[Client] ID: "..tostring(pertubator.ID))
+		log1("[Client] AreaID: "..tostring(pertubator.AreaID))
+		log1("[Client] HP: "..tostring(pertubator.HP))
+		log1("[Client] Position: "..tostring(pertubator.Position.X) .. " " .. tostring(pertubator.Position.Y).. " " .. tostring(pertubator.Position.Z))
+		log1("[Client] Rotation: "..tostring(pertubator.Rotation.X) .. " " .. tostring(pertubator.Rotation.Y))
+		log1("[Client] === ---------------- ===")
+		MClientPlayerManager.SpawnPlayer(pertubator)
+		if MServer.isHost then
+			news_manager.send_tip(db.actor, "Игрок с именем "..tostring(pertubator.Name).." подключился к серверу", nil, "nano", 20000)
+		else
+			news_manager.send_tip(db.actor, "Данные об игроке с именем "..tostring(pertubator.Name).." загружены с сервера", nil, "nano", 20000)
+		end
+	elseif paktype == MMPDefs.SND_SERVER_SAVE then
+		if pertubator.Status then
+			-- Открытие файла.
+			if pertubator.Status == 2 then
+				log1("[Client] Закрытие файла сохранения")
+				TempFileWritter:close()
+				local filepth = ConfigManager.DownloadsFolder.."\\[RCV]_MP.sav"
+				if not ConfigManager.file_exists(filepth) then
+					log1("[Client] Сохранение не загрузилось. Возможно отсутствует соединение с сервером отсутствует.")
+					CloseConnection()
+					ui_main_menu.ShowFailConnect()
+					return
+				end
+				WaitMe = false
+				local savepth = ConfigManager.SavesFolder.."[HOSTFILE]_MP.sav"
+				os.rename(filepth, savepth)
+				log1("[Client] Запускаем сохранение")
+				ConfigManager.WriteProp("CONNECTOSERVER", "1")
+				if not alife() then
+					cmd("disconnect")
+					cmd("start server(" .. "[HOSTFILE]_MP" .. "/single/alife/load)")
+				else
+					cmd("load " .. "[HOSTFILE]_MP")
+				end
+			-- Закрытие файла
+			elseif pertubator.Status == 0 then 
+				local filepth = ConfigManager.DownloadsFolder.."\\[RCV]_MP.sav"
+				if ConfigManager.file_exists(filepth) then
+					log1("[Client] Делаем бекап сохранения, отправленного с сервера")
+					local f = getFS()
+					f:file_copy(filepth, filepth..".backup")
+				end
+				log1("[Client] Создание пустого файла сохранения")
+				TempFileWritter = io.open(filepth, "wb")
+				SendData(iSerializer.serialize(MMPDefs.RET_SERVER_SAVE, 0))
+			-- Чтение и запись файла сохранения
+			elseif pertubator.Status == 1 and TempFileWritter and pertubator.data then
+				log1("[Client] Запись файла сохранения...")
+				TempFileWritter:write(pertubator.data)
+				SendData(iSerializer.serialize(MMPDefs.RET_SERVER_SAVE, 0))
+			elseif not TempFileWritter and pertubator.Status == 1 then
+				log1("[Client] Отправленное сохранение потерялось. Пакет начала не был принят. Пакет записи прибыл")
+				CloseConnection()
+				ui_main_menu.ShowFailConnect()
+			elseif not TempFileWritter and pertubator.Status == 2 then
+				log1("[Client] Отправленное сохранение потерялось. Пакет начала не был принят. Пакет конца прибыл")
+				CloseConnection()
+				ui_main_menu.ShowFailConnect()
+			elseif TempFileWritter and not pertubator.data then
+				log1("[Client] Отправленное сохранение потерялось. Пакет данных не принят. Пакет записи принят")
+				CloseConnection()
+				ui_main_menu.ShowFailConnect()
+			end
+		end
+	elseif paktype == MMPDefs.SND_INVENTORY_DATA then
+		log1("[Client] Загружаем данные инвентаря и игрока с сервера.")
+		news_manager.send_tip(db.actor, "Пожалуйста подождите, идёт обработка ваших данных с сервера...", nil, "nano", 20000)
+		local datadec = iSerializer.deserialize(pertubator, 1)[1]
+		if datadec and datadec.Health and datadec.Items then
+			amk.clear_npc_inventory(db.actor)
+			for i, d in pairs(datadec.Items) do
+				if datadec.ObjType == 1 then
+					got_item(d.section, d.Ammount)
+				else
+					got_item(d.section, 1)
+				end
+			end
+			log1("[Client] Всё готово.")
+			news_manager.send_tip(db.actor, "Данные обработанны.", nil, "nano", 20000)
+			db.actor.health = datadec.Health
+			
+			if MyName then
+				local fpth = ConfigManager.PlayerDataFolder.."\\"..MyName..".data"
+				local filew = io.open(fpth, "wb")
+				filew:write(iSerializer.serialize(pertarberk))
+				filew:close()
+			end
+		else
+			news_manager.send_tip(db.actor, "Данные поврежденны.", nil, "nano", 20000)
+		end
+		BlockInvetorySend = false
+	end
+
+	--Следующие пакеты если заспавнен игрок
+	if SpawnedPlayers[clid] == nil then return end
+
+	if paktype == MMPDefs.SND_PLAYER_DATA then
+		MClientCalls.UpdatePlayerData(clid, pertubator)
+	elseif paktype == MMPDefs.SND_FIRE_ACTION then
+		MClientPlayerManager.ActionFire(clid, pertubator)
+	elseif paktype == MMPDefs.SND_JUMP_ACTION then
+		MClientPlayerManager.Jump(clid)
+	elseif paktype == MMPDefs.SND_THROW_GRENADE then
+		MClientPlayerManager.ThrowGrenade(clid)
+	elseif paktype == MMPDefs.SND_ITEM_DROPED then
+		MClientPlayerManager.DropItem(clid, pertubator)
+	elseif paktype == MMPDefs.SND_ITEM_PICKUP then
+		-- Зачем нам обрабатывать это? Да знаю заблокировать от взятия клиентом чтобы не был дюп. но если играть по нормальному то зачем
+	elseif paktype == MMPDefs.SND_ITEM_TAKE then
+		MClientPlayerManager.TakeItem(clid, pertubator)
+	elseif paktype == MMPDefs.SND_ITEM_USE then
+		log1("[Client] Игрок с ID: " .. tostring(clid) .. " WTF ТЫ использовал ФИГНЮ")
+		MClientPlayerManager.UseItem(clid, pertubator)
+	elseif paktype == MMPDefs.SND_WEAPON_SHOWEDSTATE then
+		-- log1("[Client] Игрок с ID: " .. tostring(clid) .. " Ты В диалоге: "..tostring(pertubator))
+		--
+	elseif paktype == MMPDefs.SND_I_DEAD then
+		log1("[Client] Игрок с ID: " .. tostring(clid) .. " умер")
+		if SpawnedPlayers[clid] and SpawnedPlayers[clid].MainInfo then
+			MClientPlayerManager.DespawnPlayer(SpawnedPlayers[clid].MainInfo) -- respawn
+		end
+	elseif paktype == MMPDefs.SND_E_DEAD then
+		local dd = MClientEntityManager.AllServerEntitesRCV[pertubator.WhoDead.ID]
+		if level.object_by_id(pertubator.WhoDead.ID) then
+			MClientEntityManager.Kill(pertubator.WhoDead.ID)
+		elseif level.object_by_id(dd) then
+			MClientEntityManager.Kill(dd)
+		end
+	elseif paktype == MMPDefs.SND_RELOAD_ACTION then
+		MClientPlayerManager.ForceReloadGunBlyat(clid)
+	elseif paktype == MMPDefs.SND_RELOAD_ACTION2 then
+		MClientPlayerManager.ForceReloadGunBlyat(clid)
+	elseif paktype == MMPDefs.SND_RELOAD_ACTION_END then
+		MClientPlayerManager.ReloadGunBlyatEND(clid)
+	elseif paktype == MMPDefs.SND_ENTITY_HITDATA then
+		MClientEntityManager.SendHitByID(clid, pertubator)
+	elseif paktype == MMPDefs.SND_ENTITY_DATA then
+		MClientEntityManager.UpdateEntityes(pertubator)
+	elseif paktype == MMPDefs.SND_ENTITY_INFO then
+		MClientEntityManager.OverwriteData(pertubator)
+	elseif paktype == MMPDefs.SND_ENTITY_SPAWNED then
+		MClientEntityManager.SpawnEvent(pertubator)
+	elseif paktype == MMPDefs.SND_GIVE_INFO_PORTION then
+		MClientQuestManager.OnRCVGiveInfo(clid, pertubator)
+	elseif paktype == MMPDefs.SND_QUEST_DATA then
+		MClientQuestManager.OnRCVQuestData(clid, pertubator)
+	elseif paktype == MMPDefs.SND_SPAWNER_DATA then
+		MClientEntityManager.UpdateEntitySpawners(pertubator)
+	elseif paktype == MMPDefs.SND_I_DISCONNECTED then
+		news_manager.send_tip(db.actor, "Игрок с ID: " .. tostring(clid) .. " покинул сервер", nil, "nano", 20000)
+		if clid == 0 then
+			news_manager.send_tip(db.actor, "Игрок с ID был хостом. Теперь вы в одиночной игре", nil, "nano", 20000)
+			MClient.CloseConnection()
+			SpawnedPlayers = nil
+		end
+		if SpawnedPlayers[clid] then
+			MClientPlayerManager.DespawnPlayer(SpawnedPlayers[clid].MainInfo)
+		end
+	end
+end
+
+function CountClientData()
+    local n = 0
+    for _ in pairs(SpawnedPlayers) do
+        n = n + 1
+    end
+    return n
+end
+
+function SendMyActorInfo()
+	local NPos = MMPDefs.ConvertToSVector(db.actor:position())
+	local NRot = MMPDefs.ConvertToSVector(device().cam_dir)
+	local GPData = { Position = NPos, Rotation = NRot, MoveType = MMPDefs.GetActorState(), AreaID = db.actor:level_vertex_id(), AreaID2 = db.actor:game_vertex_id() }
+	local wpn = db.actor:active_item()
+	if wpn and wpn:get_weapon() then
+		GPData.Gun = { section = wpn:section(), straped = false }
+		GPData.Rotation = MMPDefs.ConvertToSVector(wpn:get_weapon():get_fire_direction())
+	end
+	local outfitr = db.actor:get_current_outfit()
+	if outfitr and outfitr.section then
+		GPData.Outfit = { section = outfitr:section() }
+	end
+	SendData(iSerializer.serialize(MMPDefs.SND_PLAYER_DATA, GPData))
+end
+-- Отключится
+function CloseConnection()
+	if Client and isClient then
+		SendData(iSerializer.serialize(MMPDefs.SND_I_DISCONNECTED, 0))
+		Client:close()
+		Client = nil
+		SpawnedPlayers = nil
+	end
+end
+
+--TODO: Сделать сохранение всяких прицелов и тд.
+function SendMyInvetory()
+	if BlockInvetorySend then return end
+	local InvPak = {}
+	local cnt = db.actor:object_count()
+	log1("[Client] Отправляем данные своего инвентаря")
+	for i=0, cnt-1 do
+		local obj = db.actor:object(i)
+		if obj and obj:section() ~= "bolt" and obj:section() ~= "anm_backpack" and obj:section() ~= "device_torch" then
+			if IAmAWeapon[obj:clsid()] or obj:is_weapon_magazined() then
+				InvPak[obj:id()] = { section = obj:section(), ObjType = 2 }
+			elseif obj:is_ammo() then
+				InvPak[obj:id()] = { section = obj:section(), Ammount = obj:get_current_ammo(), ObjType = 1 }
+			else
+				InvPak[obj:id()] = { section = obj:section(), ObjType = 0 }
+			end
+		end
+	end
+	SendData(iSerializer.serialize(MMPDefs.SND_INVENTORY_DATA, { Items = InvPak, Health = db.actor.health }))
+end

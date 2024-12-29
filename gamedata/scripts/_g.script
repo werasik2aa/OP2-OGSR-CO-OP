@@ -1,0 +1,2318 @@
+INVALID_STORY_ID = 4294967295
+NO_ACTIVE_SLOT = 255
+sys_ini = system_ini()
+level_object = level.object_by_id
+
+-- Короткие имена для частых функций
+voice = xr_sound.get_safe_sound_object
+sms = news_manager.send_tip
+sms2 = amk.send_tip
+translate = game.translate_string
+g_inv_name = news_manager.get_inv_name
+gt_inv_name = news_manager.gett_inv_name
+
+g_time_factor = sys_ini:r_float("alife", "time_factor")
+g_switch_distance = sys_ini:r_float("alife", "switch_distance")
+
+-- Короткие функции для работы с метками
+map_add = level.map_add_object_spot
+map_adds = level.map_add_object_spot_ser
+map_has = level.map_has_object_spot
+map_chg = level.map_change_spot_hint
+
+-- задаётся в start_game_callback
+ai = nil
+
+-- ver
+is_debug_mode = true -- sys_ini:r_bool("features", "script_dbg")
+get_mode_ver = translate("addon_ver")
+--
+
+flag_can_save = nil -- Запрет на сохранение в некоторых местах
+
+-----------------------------------------------------------------------------
+-- Добавил экспорт для движкового psHUD_Flags - level.get_hud_flags() и для HUD().GetUI()->GameIndicatorsShown() - level.game_indicators_shown().
+-- Константы для добавления в _g.script (пока не делал экспорт):
+HUD_CROSSHAIR         = 1 * 2 ^ 0
+HUD_CROSSHAIR_DIST    = 1 * 2 ^ 1
+HUD_WEAPON            = 1 * 2 ^ 2
+HUD_INFO              = 1 * 2 ^ 3
+HUD_DRAW              = 1 * 2 ^ 4
+HUD_CROSSHAIR_RT      = 1 * 2 ^ 5
+HUD_WEAPON_RT         = 1 * 2 ^ 6
+HUD_CROSSHAIR_DYNAMIC = 1 * 2 ^ 7
+HUD_CROSSHAIR_RT2     = 1 * 2 ^ 9
+HUD_DRAW_RT           = 1 * 2 ^ 10
+HUD_CROSSHAIR_BUILD   = 1 * 2 ^ 11
+
+-- Нормальный (копия движкового) способ проверить что игра показывает худ:
+function hud_present()
+	return level.game_indicators_shown() and level.get_hud_flags():is(bit_or(HUD_DRAW, HUD_DRAW_RT))
+end
+-----------------------------------------------------------------------------
+
+--*********************************************************************************************************
+--==============================================================================================
+log1("--LUA version: ["..(jit.version or _VERSION).."]")
+--==============================================================================================
+log1("--Mode version: " .. get_mode_ver .. ". Debug mode: " .. tostring(is_debug_mode))
+--==============================================================================================
+FFI = require('ffi') --Делать только здесь и только один раз!
+--==============================================================================================
+math.randomseed(os.time())
+--====================================[LuaFileSystem]===========================================
+--lfs.dll должен быть в папке bin.
+--xpcall(function() require("lfs") end, log1)
+--=======================================[LuaXML]===============================================
+--_luaxml.script должен быть в папке scripts.
+--prefetch("_luaxml")
+--===================[string.lower и string.upper с поддержкой русских букв]====================
+--[=[--KRodin: Из-за setlocale могут возникать проблемы.
+os.setlocale("", "ctype") --Для старых версий LuaJIT достаточно установить правильную локаль.
+if jit.version_num >= 20000 then --В новых версиях установки локали недостаточно
+	FFI.cdef[[
+		int tolower( int code );
+		int toupper( int code );
+	]]
+	string.lower = function(s)
+		return s:gsub('.', function(x)
+			return string.char( FFI.C.tolower( x:byte() ) )
+		end)
+	end
+	string.upper = function(s)
+		return s:gsub('.', function(x)
+			return string.char( FFI.C.toupper( x:byte() ) )
+		end)
+	end
+end
+--]=]
+do
+	local lower = string.lower
+	string.lower = function(s)
+		return lower(s:gsub("([А-Я])",function(c) return string.char(c:byte()+32) end):gsub("Ё", "ё"))
+	end
+	--
+	local upper = string.upper
+	string.upper = function(s)
+		return upper(s:gsub("([а-я])",function(c) return string.char(c:byte()-32) end):gsub("ё", "Ё"))
+	end
+end
+--=================================[Функции из xrLuaFix]========================================
+--Cрезать первое "слово"
+string.trim_w = function(s) return s:gsub("%s-(%S+)%s+", '', 1) end
+--Срезать пробелы слева
+string.trim_l = function(s) return s:gsub("^%s+", '') end
+--Срезать пробелы справа
+string.trim_r = function(s) return s:gsub("%s*$", '') end
+--Срезать пробелы слева и справа
+string.trim   = function(s) return s:match( "^%s*(.*%S)" ) or "" end
+------------------------------------------------------------------------------------------------
+--Возвращает кол-во элементов в таблице. Для массивов надо использовать оператор #.
+table.size = function(t)
+	local size = 0
+	for _ in pairs(t) do size = size + 1 end
+	return size
+end
+--Возвращает случайный элемент массива. Для обычных таблиц такое делать нет никакого смысла. В движке было сделано как-то странно.
+table.random = function(t)
+	return t[math.random(#t)]
+end
+--Возвращает массив с ключами таблицы
+table.keys = function(t)
+	local arr = {}
+	for k, _ in pairs(t) do
+		table.insert(arr, k)
+	end
+	return arr
+end
+--Возвращает массив с значениями таблицы
+table.values = function(t)
+	local arr = {}
+	for _, v in pairs(t) do
+		table.insert(arr, v)
+	end
+	return arr
+end
+-- Проверка наличия значения в таблице
+table.ifind = function(tbl, val)
+	for _, v in ipairs(tbl) do
+		if v == val then
+			return true
+		end
+	end
+	return false
+end
+--==============================================================================================
+-- Взято из аддона Naxac'a
+local to_ptrn = {
+	[' '] = '%s',
+	['.'] = '%.',
+	['%'] = '%%',
+	['*'] = '%*',
+	['-'] = '%-'
+}
+string.explode = function( div,    -- разделитель
+                           str,    -- строка
+                           clear ) -- обрезать ли пробелы по краям строк (false/true)
+	local ret = {}
+	for s in str:gmatch("([^"..(to_ptrn[div] or div).."]+)") do
+		ret[#ret+1] = (clear and s:trim() or s)
+	end
+	return ret
+end
+--==============================================================================================
+-- очистка строки от "лишних" символов (полезно при работе с FS)
+string.clear = function(str) --KRodin: поправил функцию, теперь работает.
+	return str:gsub( '[/:<>|%*%?"\\]*', "" )
+end
+-- string.rq = function(s) return dsh.remove_quotes(s) end
+--==============================================================================================
+-- Форматирование текста по ширине
+-- http://www.amk-team.ru/forum/topic/13216-sborochnyy-ceh/?do=findComment&comment=959286
+string.width = function(str, width, return_table, indent, paragrapf)
+    indent    = indent    or 0
+    paragrapf = paragrapf or 0
+    width     = (width or 80) - indent
+
+    local i = string.rep(' ', indent)
+    local t = {}
+    local line = string.rep(' ', paragrapf)
+
+    for exp, word in str:gmatch('(%s-(%S+))') do
+        if line == '' and #t ~= 0 then
+            exp = word
+        end
+
+        local l_len = #line
+        local len = l_len + #exp
+
+        if len > width then
+            t[#t+1], line = line, word
+        else
+            line = line .. exp
+            if l_len == width then
+                t[#t+1], line = line, ''
+            end
+        end
+    end
+
+    t[#t+1] = line
+
+    if return_table then
+        return t
+    else
+        return i .. table.concat(t, '\n' .. i)
+    end
+end
+
+-- Prophet13: Математически правильное округление. Работает и для отрицательных чисел.
+function math.round(v)
+	return (v>=0 and math.floor(v+0.5)) or math.ceil(v-0.5)
+end
+
+-- https://github.com/naxac/CP2_AddOn/blob/8d140d24aa042d283b3aa8b28f372d2e5a202c52/Game/gamedata/scripts/xr_extensions.script
+-- выравнивание значения n в пределы от min до max
+math.clamp = function( n, min, max )
+	if min > max then
+		min, max = max, min
+	end
+	return ( n > max and max ) or ( n < min and min ) or n
+end
+--=============================================================================
+-- поверхностное (простое) клонирование таблицы:
+-- создаётся копия таблицы и копии всех элементов без их клонирования,
+-- т.е. для ссылочных типов обе таблицы будут содержать ссылки на одни и те же данные
+-- метатаблицы не копируются
+function table.clone_simple( tbl )
+  local res = {}
+  for k, v in pairs( tbl ) do
+    res[ k ] = v
+  end
+  return res
+end
+--==============================================================================================
+function table.copy(tbl) --Возвращает копию таблицы.
+	local mt = getmetatable(tbl)
+	local res = {}
+	for k, v in pairs(tbl) do
+		if type(k) == "table" then
+			k = table.copy(k)
+		end
+		if type(v) == "table" then
+			v = table.copy(v)
+		end
+		res[k] = v
+	end
+	setmetatable(res, mt)
+	return res
+end
+--=================================[CUIScriptWnd Extension]=====================================
+-- Вызов обычный, как и в AddCallback, но после последнего аргумента можно передавать множество дополнительных.
+function CUIScriptWnd:Connect(name, event, func, ...)
+	local args = {...}
+	return self:AddCallback( name, event, function() func(unpack(args)) end )
+end
+--==============================================================================================
+local tostring_all_tbl = {
+    ["table"] 	   = function(table, ind) --Распечатка таблиц
+                        local res = "{" --Начало
+                        local end_res = ind and "\n"..ind.."}" or "\n}" --Конец
+                        local def_ind = "  " --Отступ от начала строки
+                        ind = ind and ind..def_ind or def_ind --Для каждой "таблицы внутри таблицы" отступ увеличивается в 2 раза
+                        for k, v in pairs(table) do
+                            res = res.."\n"..ind.."["..tostring_all(k, ind).."] = "..tostring_all(v, ind)..","
+                        end
+                        return res..end_res
+                    end,
+    ["string"]    = function(v) return "'"..v.."'" end, --Строки берём в кавычки. Это нужно, чтобы можно было отличить строку "123" от числа 123, "nil" от nil и тд...
+    -- ["string"]    = function(v) return v end,
+    ["number"]    = function(v) return tostring(v) end,
+    ["boolean"]   = function(v) return tostring(v) end,
+    ["nil"]       = function(v) return tostring(v) end,
+    ["function"]  = function() return "[[FUNCTION]]" end, --Function, Userdata и Thread распечатать нельзя, просто заменим на строки
+    ["userdata"]  = function() return "[[USERDATA]]" end,
+    ["thread"]    = function() return "[[THREAD]]" end,
+}
+--Конвертирование чего угодно в строку. Использовать только для вывода в лог!
+function tostring_all(obj, ind) --ind - служебный аргумент для распечатки "таблиц в таблицах".
+	return tostring_all_tbl[type(obj)](obj, ind)
+end
+
+function log2(fmt, ...) -- Простая обёртка для log1
+	if #{...} < 1 then log1(fmt) return end
+	log1(fmt:format(...))
+end
+
+--Функциональная обёртка для log1.
+--Делает дополнительную работу по конвертации параметров, которые не воспринимаются родной функцией string.format.
+--Параметры можно передавать ЛЮБОГО ТИПА! В строке формата они должны стоять как %s (потому, что будут сконвертированы в строки).
+function log3(fmt, ...)
+	local args = {...}
+	for i=1, #args do
+		args[i] = tostring_all(args[i])
+	end
+	local res, msg = pcall(string.format, fmt, unpack(args))
+	if not res then --Если произошла ошибка
+		msg = "!!log3 failed: "..msg.."\n"..debug.traceback()
+	end
+	log1(msg)
+end
+
+local logs_cach = {}
+--Функция создаёт новый лог-файл и выводит текст в него.
+--fname - название лог-файла, например "Anomaly_Evader". Он будет создан в папке logs, к названию добавится дата и время создания.
+--fmt, ... - строка формата с параметрами как и в функции log3
+function log4(fname, fmt, ...)
+	local f = logs_cach[fname]
+	if not f then
+		local dt = os.date("*t")
+		local fpath = getFS():update_path("$logs$", string.format("%s_%02d.%02d.%02d_%02d.%02d.%02d.log",fname,dt.day,dt.month,dt.year,dt.hour,dt.min,dt.sec))
+		f = io.open(fpath, "w")
+		logs_cach[fname] = f
+	end
+	local args = {...}
+	for i=1, #args do
+		args[i] = tostring_all(args[i])
+	end
+	local res, msg = pcall(string.format, fmt, unpack(args))
+	if not res then
+		msg = "!!log4 failed: "..msg.."\n"..debug.traceback()
+	end
+	f:write(msg..'\n')
+	f:flush()
+end
+--==============================================================================================
+function abort(fmt, ...)
+	log1(debug.traceback())
+	log3(fmt, ...)
+	error(tostring(fmt))
+end
+function ASSERT(cond, ...)
+	if not cond then
+		abort(...)
+	end
+end
+--==============================================================================================
+local con = get_console()
+
+function cmd(scmd, ...)
+	ASSERT(scmd, "[cmd] scmd is a nil reference")
+	local args = {...}
+	if #args > 0 then
+		scmd = scmd..' '..table.concat(args, ' ')
+	end
+	con:execute(scmd)
+end
+--==============================================================================================
+log = function(...) --[[log1(...)]] end
+--***************************************************************************************************************
+
+function reload_sys_ini()
+	reload_system_ini()
+	sys_ini = system_ini()
+	log1("--sys_ini reloaded")
+end
+
+schemes = {} -- соответствие схем модулям
+stypes  = {} -- типы схем
+
+-- Загружает схему из файла на диске и активирует в мотиваторе.
+-- Здесь:
+--  filename - имя файла, в котором реализована схема, без расширения
+--  scheme - имя схемы
+function load_scheme(filename, scheme, stype)
+  schemes[scheme] = filename
+  stypes[scheme] = stype
+end
+
+-------======= ini reading functions by sapsan =======------
+
+-- cp2ogsr: добавлен лог для отладки
+-- TODO: по возможности убрать чтение параметров из этих функции на всяких апдейтах и т.п. и использовать их по минимуму
+
+function getIniValueFloat(sect, line, default, iniFileName)
+	-- log3("~~[_G.getIniValueFloat]: sect: [%s], line: [%s], default: [%s], iniFileName: [%s]", sect, line, default, iniFileName or "nil")
+	return get_float(sect, line, default, iniFileName and dsh.cached_ini_file(iniFileName))
+end
+function getIniValueU32(sect, line, default, iniFileName)
+	-- log3("~~[_G.getIniValueU32]: sect: [%s], line: [%s], default: [%s], iniFileName: [%s]", sect, line, default, iniFileName or "nil")
+	return get_u32(sect, line, default, iniFileName and dsh.cached_ini_file(iniFileName))
+end
+function getIniValueString(sect, line, default, iniFileName)
+	-- log3("~~[_G.getIniValueString]: sect: [%s], line: [%s], default: [%s], iniFileName: [%s]", sect, line, default, iniFileName or "nil")
+	return get_string(sect, line, default, iniFileName and dsh.cached_ini_file(iniFileName))
+end
+function getIniValueStringWQ(sect, line, default, iniFileName)
+	-- log3("~~[_G.getIniValueStringWQ]: sect: [%s], line: [%s], default: [%s], iniFileName: [%s]", sect, line, default, iniFileName or "nil")
+	return get_string_wq(sect, line, default, iniFileName and dsh.cached_ini_file(iniFileName))
+end
+function getIniValueBool(sect, line, default, iniFileName)
+	-- log3("~~[_G.getIniValueBool]: sect: [%s], line: [%s], default: [%s], iniFileName: [%s]", sect, line, default, iniFileName or "nil")
+	return get_bool(sect, line, default, iniFileName and dsh.cached_ini_file(iniFileName))
+end
+
+function iniLinesCount(sect, iniFileName)
+	-- log3("~~[_G.iniLinesCount]: sect: [%s], iniFileName: [%s]", sect, iniFileName or "nil")
+	local ini = iniFileName and dsh.cached_ini_file(iniFileName) or sys_ini
+	if ini:section_exist(sect) then
+		return ini:line_count(sect)
+	else
+		return 0
+	end
+end
+
+function iniLineSectionExist(sect, iniFileName)
+	-- log3("~~[_G.iniLineSectionExist]: sect: [%s], iniFileName: [%s]", sect, iniFileName or "nil")
+	local ini = iniFileName and dsh.cached_ini_file(iniFileName) or sys_ini
+	return ini:section_exist(sect)
+end
+
+function getIniLine(sect, lineNumber, defaultKey, defaultValue, iniFileName)
+	-- log3("~~[_G.getIniLine]: sect: [%s], lineNumber: [%s], defaultKey: [%s], defaultValue: [%s], iniFileName: [%s]", sect, lineNumber, defaultKey, defaultValue, iniFileName or "nil")
+	local ini = iniFileName and dsh.cached_ini_file(iniFileName) or sys_ini
+	if ini:section_exist(sect) then
+		return ini:r_line(sect, lineNumber, defaultKey, defaultValue)
+	else
+		return false, defaultKey, defaultValue
+	end
+end
+
+-------======= / ini reading functions by sapsan =======------
+----------------------------------------------------------------------
+
+function printf(fmt, ...)
+	--log3(fmt, ...)
+end
+
+function mylog(msg)
+	--log1(msg)
+end
+
+function dbglog(fmt, ...)
+	--log3(fmt, ...)
+end
+
+----------------------------------------------------------------------
+if nil == time_global then
+  time_global = function () return device():time_global() end
+end
+
+function wait_game(time_to_wait)
+    verify_if_thread_is_running()
+    if (time_to_wait == nil) then
+        coroutine.yield()
+    else
+        local time_to_stop = game.time() + time_to_wait
+        while game.time() <= time_to_stop do
+            coroutine.yield()
+        end
+    end
+end
+
+function wait(time_to_wait)
+    verify_if_thread_is_running()
+    if (time_to_wait == nil) then
+        coroutine.yield()
+    else
+        local time_to_stop = time_global() + time_to_wait
+        while time_global() <= time_to_stop do
+            coroutine.yield()
+        end
+    end
+end
+
+function action(obj,...)
+    local arg = {...}
+    local act = entity_action()
+    local i = 1
+    while true do
+        if (arg[i] ~= nil) then
+            act:set_action(arg[i])
+        else
+            break
+        end
+        i = i + 1
+    end
+    if (obj ~= nil) then
+        obj:command(act,false)
+    end
+    return  entity_action(act)
+end
+
+function action_first(obj,...)
+    local arg = {...}
+    local act = entity_action()
+    local i = 1
+    while true do
+        if (arg[i] ~= nil) then
+            act:set_action(arg[i])
+        else
+            break
+        end
+        i = i + 1
+    end
+    if (obj ~= nil) then
+        obj:command(act,true)
+    end
+    return  entity_action(act)
+end
+
+function round (value)
+    local min = math.floor (value)
+    local max = min + 1
+    if value - min > max - value then return max end
+    return min
+end
+
+function debug_get_level_object(obj_name)
+    local res = level.debug_object(obj_name)
+    while res == nil do
+
+-- НЕ ЗАКОММЕНТАРИВАЙТЕ, ИНАЧЕ НЕ БУДЕТ ВИДНО ОШИБОК ПРИ РАССТАНОВКЕ ОБЪЕКТОВ!
+        printf("get_level_object() is waiting for object \"%s\"", obj_name)
+
+        res         = level.object(obj_name)
+        wait        ()
+    end
+    return          res
+end
+
+function debug_get_actor()
+    local res       = level.debug_actor()
+    while res == nil do
+        res         = level.debug_actor()
+        wait        ()
+    end
+    return          res
+end
+
+function distance_between(obj1, obj2)
+    return obj1:position():distance_to(obj2:position())
+end
+
+--// Если один объект nil, например нет актера, то считаем, что он далеко
+function distance_between_safe(obj1, obj2)
+    if(obj1 == nil or obj2 == nil) then return 100000 end
+  return obj1:position():distance_to(obj2:position())
+end
+
+--------------------------------------------------
+-- іласс LUA реализуі   ий Finite State Machine
+-- для управления персонажами
+--------------------------------------------------
+class 'FSM'
+
+--  инициализация путем задания объекта Non-Player Character
+function FSM:__init(script_name, npc_obj)
+    -- указатель на подконтрольнvй NPC
+    self.npc = npc_obj
+    -- строка - имя скрипта, которvй запускает игру
+    self.script_name = script_name
+    -- матрица, задаі   ая граф переходов состояний
+    -- реализуется как двумерная таблица
+    self.transition_matrix = {[0] = {}}
+    -- номер теку   его состояния
+    self.current_state = 0
+
+    -- флаг того, что машина вклічена
+    self.machine_running = true
+
+    printf("inialization FSM for NPC %s", self.npc:name())
+end
+
+function FSM:is_running()
+    return self.machine_running
+end
+
+function FSM:start()
+    printf("starting FSM for %s", self.npc:name())
+    self.machine_running = true
+end
+
+function FSM:stop()
+    printf("stoping FSM for %s", self.npc:name())
+    self.machine_running = false
+    self:reset_script_control()
+end
+
+
+--  добавление указателя на булеву
+--  функциі условия перехода
+function FSM:set_transition(from_state_num, to_state_num, cond_func)
+    printf("in setting transition %d, %d ", from_state_num, to_state_num)
+
+    if self.transition_matrix[from_state_num] == nil then
+       self.transition_matrix[from_state_num] = {[to_state_num] = cond_func}
+    else
+       self.transition_matrix[from_state_num][to_state_num] = cond_func
+    end
+end
+
+-- единичная проверка FSM
+function FSM:run()
+    local transition_vector = self.transition_matrix[self.current_state]
+    table.foreach(transition_vector,
+                  function(to_state_num, cond_func)
+                        if cond_func(self.npc, self) == true then
+                            printf("transition from %d to %d", self.current_state, to_state_num)
+
+                            if to_state_num == 0 then
+                                self:reset_script_control()
+                            end
+
+                            --if  self.current_state == 0 then
+                            --  self:set_script_control()
+                            --end
+
+                            self.current_state = to_state_num
+                            return true
+                        end
+                        return nil
+                  end)
+end
+
+
+-- запуск бесконечного цикла FSM
+function FSM:run_loop()
+    printf("running FSM loop for NPC %s", self.npc:name())
+
+    while self:is_running() do
+        local transition_vector = self.transition_matrix[self.current_state]
+        table.foreach(transition_vector,
+                      function(to_state_num, cond_func)
+                            if cond_func(self.npc, self) == true then
+                                printf("transition from %d to %d", self.current_state, to_state_num)
+
+                                if to_state_num == 0 then
+                                    self:reset_script_control()
+                                end
+
+                                --if  self.current_state == 0 then
+                                --  self:set_script_control()
+                                --end
+
+                                self.current_state = to_state_num
+                                return true
+                            end
+                            return nil
+                      end)
+        if self.npc:alive () == false then
+           self.npc:script (false, self.script_name)
+           return
+           end
+        wait()
+    end
+end
+
+-- взятие под контроль скрипта NPC (переход из нулевого состояния)
+function FSM:set_script_control()
+    printf("set script control for FSM of NPC %s", self.npc:name())
+    self.npc:script(true, self.script_name)
+end
+
+-- отпускание из под контроля скрипта NPC (переход в нулевое состояние)
+function FSM:reset_script_control()
+    printf("reset script control for FSM of NPC %s", self.npc:name())
+    self.npc:script(false, self.script_name)
+end
+
+--------------------------------------------------
+-- end of  class 'FSM'
+--------------------------------------------------
+
+function reset_action (npc, script_name)
+    if npc:get_script () then
+       npc:script (false, script_name)
+    end
+    npc:script (true, script_name)
+end
+
+class "script_object"
+
+function script_object:__init(self,name,script,...)
+  self.action         = action(nil,...)
+  self.object_name    = name
+  self.script_name    = script
+  self.object         = nil
+end
+
+function script_object:update()
+    local                   obj = self.object
+    self.object             = level.object(self.object_name)
+    if ((obj == nil) and (self.object ~= nil)) then
+        self.object:script  (true,self.script_name)
+        self.object:command (self.action,false)
+    end
+end
+
+--
+-- передача персонажу информации
+--
+
+function GiveInfoViaPda(obj_receiver, obj_sender, info_number)
+  MClientOnEvents.OnIGetInfo(info_number, 2, obj_receiver:id(), obj_sender:id())
+  obj_receiver:give_info_portion_via_pda(info_number, obj_sender)
+end
+
+
+--------------------------------------------------
+-- Functions and variables added by Zmey
+--------------------------------------------------
+
+-- іонстанта, которуі использовать в местах, где нужно задать неограниченное время действия
+time_infinite = 100000000
+
+-- =азвание скрипта, которvй в даннvй момент находится в отладке
+-- (в этом скрипте будут срабатvвать вvзовv функции debug_log)
+debug_script_name = ""
+
+-- Tvводит в лог строчку, если script_name == debug_script_name
+-- Lспользуется для отрадки сценариев
+function debug_log(script_name, fmt, ...)
+  if debug_script_name == script_name then
+    log3(fmt, ...)
+  end
+end
+
+-- +сли в даннvй момент вvполняется какое-то действие, прерvвает его и отклічает скриптовvй режим
+function interrupt_action(who, script_name)
+  if who:get_script() then
+    who:script(false, script_name)
+  end
+end
+
+function random_choice(...)
+    local arg = {...}
+    local r = math.random(1, #arg)
+    return arg[r]
+end
+
+function new_action(...)
+    local arg = {...}
+    local act = entity_action()
+    for i = 1, #arg do
+        act:set_action(arg[i])
+    end
+    return act;
+end
+
+obj_last_actions = {};
+
+function perform_action(obj, action_name, action)
+  if (obj ~= nil) then
+    obj_last_actions[obj] = action_name
+    obj:command(act, false)
+  end
+end
+
+function last_action(obj)
+  return obj_last_actions[obj]
+end
+
+function if_then_else(cond, if_true, if_false)
+    if cond then
+        return if_true
+    end
+    return if_false
+end
+
+function update_action (npc, script, ...)
+    local arg = {...}
+    if npc == nil then return end
+    local act = npc:action ()
+    if arg.n == 0 then return end
+
+    if act == nil then act = entity_action () end
+
+    for a = 1, arg.n, 1 do
+        if arg[a] ~= nil then act:set_action (arg[a]) end
+    end
+    reset_action (npc, script)
+    npc:command (act, false)
+
+end
+
+
+function set_current_time (hour, min, sec)
+    local current_time_factor = level.get_time_factor ()
+
+    printf ("Need time : %d:%d:%d", hour, min, sec)
+
+    local current_time = game.time ()
+    local c_day = math.floor (current_time / 86400000)
+    local c_time = current_time - c_day * 86400000
+    local n_time = (sec + min * 60 + hour * 3600) * 1000
+
+    if c_time > n_time then c_day = c_day + 1 end
+    n_time = n_time + c_day * 86400000
+
+    level.set_time_factor (10000)
+    while game.time () < n_time do wait () end
+
+    level.set_time_factor (current_time_factor)
+end
+
+
+
+if (editor() == false) then
+class "pp_effector" (effector)
+
+function pp_effector:__init(effector_type,start_time,dest_power,life_time) super(effector_type,start_time)
+    self.start_time = start_time
+    self.stop_time  = start_time + life_time
+    self.max_power  = dest_power
+end
+
+function pp_effector:process(pp)
+    effector.process(self,pp)
+
+    local curr_time = time_global()
+    local d         = 0.0
+
+    if curr_time < self.start_time then
+        d           = 0.0
+    else
+        if curr_time < self.stop_time then
+            d           = (curr_time - self.start_time) / (self.stop_time - self.start_time)
+        else
+            self.info   = self.max_power
+            return      true
+        end
+    end
+
+    local dual      = duality()
+    local noise     = noise()
+    local base      = color()
+    local gray      = color()
+    local add       = color()
+
+    dual.h          = self.max_power.dual.h         * d
+    dual.v          = self.max_power.dual.v         * d
+
+    noise.grain     = self.max_power.noise.grain        * d
+    noise.intensity     = self.max_power.noise.intensity    * d
+    noise.fps       = self.max_power.noise.fps      * d
+
+    base.r          = self.max_power.color_base.r       * d
+    base.g          = self.max_power.color_base.g       * d
+    base.b          = self.max_power.color_base.b       * d
+
+    gray.r          = self.max_power.color_gray.r       * d
+    gray.g          = self.max_power.color_gray.g       * d
+    gray.b          = self.max_power.color_gray.b       * d
+
+    add.r           = self.max_power.color_add.r        * d
+    add.g           = self.max_power.color_add.g        * d
+    add.b           = self.max_power.color_add.b        * d
+
+    pp.gray         = self.max_power.gray           * d
+    pp.blur         = self.max_power.blur           * d
+
+    pp.dual         = dual
+    pp.noise        = noise
+    pp.color_base       = base
+    pp.color_gray       = gray
+    pp.color_add        = add
+
+    self.info       = pp
+
+    return              true
+end
+
+function pp_effector:finished()
+    return          self.stop_time < time_global()
+end
+
+--
+-- postprocess for rainbow
+--
+class "pp_linear_lerp" (effector)
+
+function pp_linear_lerp:__init(effector_type,start_time,life_time,start_power,dest_power) super(effector_type,start_time)
+    self.start_time = start_time
+    self.stop_time  = start_time + life_time
+    self.min_power  = start_power
+    self.max_power  = dest_power
+end
+
+function pp_linear_lerp:process(pp)
+    effector.process(self,pp)
+
+    local curr_time = time_global()
+    local d         = 0.0
+
+    if curr_time < self.start_time then
+        d           = 0.0
+    else
+        if curr_time < self.stop_time then
+            d           = (curr_time - self.start_time) / (self.stop_time - self.start_time)
+        else
+            self.info   = self.max_power
+            return      true
+        end
+    end
+
+    local dual      = duality()
+    local noise     = noise()
+    local base      = color()
+    local gray      = color()
+    local add       = color()
+
+    dual.h          = self.min_power.dual.h         + (self.max_power.dual.h        - self.min_power.dual.h     )   * d
+    dual.v          = self.min_power.dual.v         + (self.max_power.dual.v        - self.min_power.dual.v     )   * d
+
+    noise.grain     = self.min_power.noise.grain        + (self.max_power.noise.grain       - self.min_power.noise.grain    )   * d
+    noise.intensity     = self.min_power.noise.intensity    + (self.max_power.noise.intensity   - self.min_power.noise.intensity)   * d
+    noise.fps       = self.min_power.noise.fps      + (self.max_power.noise.fps         - self.min_power.noise.fps  )   * d
+
+    base.r          = self.min_power.color_base.r       + (self.max_power.color_base.r      - self.min_power.color_base.r   )   * d
+    base.g          = self.min_power.color_base.g       + (self.max_power.color_base.g      - self.min_power.color_base.g   )   * d
+    base.b          = self.min_power.color_base.b       + (self.max_power.color_base.b      - self.min_power.color_base.b   )   * d
+
+    gray.r          = self.min_power.color_gray.r       + (self.max_power.color_gray.r      - self.min_power.color_gray.r   )   * d
+    gray.g          = self.min_power.color_gray.g       + (self.max_power.color_gray.g      - self.min_power.color_gray.g   )   * d
+    gray.b          = self.min_power.color_gray.b       + (self.max_power.color_gray.b      - self.min_power.color_gray.b   )   * d
+
+    add.r           = self.min_power.color_add.r        + (self.max_power.color_add.r       - self.min_power.color_add.r    )   * d
+    add.g           = self.min_power.color_add.g        + (self.max_power.color_add.g       - self.min_power.color_add.g    )   * d
+    add.b           = self.min_power.color_add.b        + (self.max_power.color_add.b       - self.min_power.color_add.b    )   * d
+
+    pp.gray         = self.min_power.gray           + (self.max_power.gray          - self.min_power.gray       )   * d
+    pp.blur         = self.min_power.blur           + (self.max_power.blur          - self.min_power.blur       )   * d
+
+    pp.dual         = dual
+    pp.noise        = noise
+    pp.color_base       = base
+    pp.color_gray       = gray
+    pp.color_add        = add
+
+    self.info       = pp
+
+    return          true
+end
+
+function pp_linear_lerp:finished()
+    return          self.stop_time < time_global()
+end
+--
+-- end of postprocess for rainbow
+--
+
+----------------------------------------------------------------------------------------------------------------------
+-- Evaluators
+----------------------------------------------------------------------------------------------------------------------
+-- зарезервированv id с номерами от 0 до 256 для создания стандартнvх эвалуаторов.
+
+--Constant evaluator
+class "const_evaluator" (property_evaluator)
+
+function const_evaluator:__init (name, value) super (nil, name)
+    self.value = value
+end
+
+function const_evaluator:evaluate()
+    return          self.value
+end
+
+--Wait evaluator
+class "wait_evaluator" (property_evaluator)
+
+function wait_evaluator:__init (wait_time) super ()
+    self.wait_time = wait_time
+    self.first_call = true
+    self.current_time = 0
+end
+
+function wait_evaluator:evaluate ()
+    if self.first_call == true then
+       self.first_call = false
+       self.current_time = device ():time_global ()
+       return false
+    end
+
+    local t = device():time_global () - self.current_time;
+    if t > self.wait_time then return true end
+    return false
+end
+--------------------------------------------------------------------------------
+class "enabled_evaluator" (property_evaluator)
+
+function enabled_evaluator:__init (name, storage) super ()
+    self.a = storage
+end
+
+function enabled_evaluator:evaluate()
+    return  self.a.enabled
+end
+
+end -- end of editor() == false
+
+
+function str_split (str)
+
+    local strlen = string.len (str)
+
+    local parts = {{}, {}, {}, {}}
+    local cpart = 1
+
+    for a = 1, strlen, 1 do
+        local char = string.byte (str, a)
+        if char ~= 95 then
+           table.insert (parts[cpart], char)
+        else
+           cpart = cpart + 1
+           if cpart > 4 then break end
+        end
+    end
+
+    if cpart ~= 4 then return "unknown", "stalker", 0, 0 end
+
+    local str1 = string.char ()
+    local str2 = string.char ()
+    local str3 = string.char ()
+    local str4 = string.char ()
+
+    local ref = parts[1]
+    for a = 1, #ref, 1 do
+        str1 = string.format ("%s%c", str1, ref[a])
+    end
+
+    ref = parts[2]
+    for a = 1, #ref, 1 do
+        str2 = string.format ("%s%c", str2, ref[a])
+    end
+
+    ref = parts[3]
+    for a = 1, #ref, 1 do
+        str3 = string.format ("%s%c", str3, ref[a])
+    end
+
+    ref = parts[4]
+    for a = 1, #ref, 1 do
+        str4 = string.format ("%s%c", str4, ref[a])
+    end
+
+    printf ("%s %s %d %d", str1, str2, str3, str4)
+    return str1, str2, (str3 + 1) - 1, (str4 + 1) - 1
+end
+
+function random_number (min_value, max_value)
+    math.randomseed (device ():time_global ())
+    if min_value == nil and max_value == nil then
+      return math.random ()
+    else
+      return math.random (min_value, max_value)
+    end
+end
+
+local ms_per_day = 24 * 60 * 60 * 1000
+function day_time()
+    return math.mod( game.time(), ms_per_day )
+end
+
+--Time in hours
+function local_hours()
+    return math.floor( math.mod( game.time()/1000, 86400 )/ 3600 )
+end
+
+-- парсит строку вида "ааа, ббб, ввв..." в таблицу { "ааа", "ббб", "ввв", ... }
+-- Чугай
+-- Manool: важно: поправил функцию, теперь учитываются знаки -\+. И в функциях ниже.
+function parse_names( s )
+	return string.explode(",", s, true)
+end
+
+-- Конвертирует строку вида "actor, 0, actor_dolg, 1, actor_freedom, 2, ..."
+-- В таблицу вида { ["actor"] = "0", ["actor_dolg"] = "1", ["actor_freedom"] = "2", ... }
+function parse_key_value( s )
+    local t = {}
+	if s == nil then return nil end
+	local key = nil
+	for _, name in pairs(parse_names(s)) do
+    if key == nil then
+      key = name
+    else
+      t[key] = name
+      key = nil
+    end
+    end
+    return t
+end
+
+-- парсит строку вида "n1, n2, n3..." в таблицу { n1, n2, n3, ... } где n1, n2, n3... - дробные числа
+-- Чугай
+function parse_nums( s )
+  local t = {}
+	for _, entry in ipairs(parse_names(s)) do
+    table.insert( t, tonumber( entry ) )
+  end
+
+  return t
+end
+
+-- Їа®ўҐапҐв, Ґбвм «Ё ®ЎкҐЄв ў ®­« ©­Ґ
+function is_object_online(obj_id)
+  return level.object_by_id(obj_id) ~= nil
+end
+
+function get_clsid( npc )
+  return npc and npc:clsid()
+end
+
+
+function isMagazinedWeapon( o )
+  return o and o:is_weapon_magazined()
+end
+
+--Tvчисляет yaw в радианах
+function yaw( v1, v2 )
+    return  math.acos( ( (v1.x*v2.x) + (v1.z*v2.z ) ) / math.sqrt((v1.x*v1.x + v1.z*v1.z ) * (v2.x*v2.x + v2.z*v2.z )) )
+end
+
+function yaw_degree( v1, v2 )
+    return  (math.acos( ( (v1.x*v2.x) + (v1.z*v2.z ) ) / math.sqrt((v1.x*v1.x + v1.z*v1.z ) * (v2.x*v2.x + v2.z*v2.z )) ) * 57.2957)
+end
+function yaw_degree3d( v1, v2 )
+    return  (math.acos((v1.x*v2.x + v1.y*v2.y + v1.z*v2.z)/math.sqrt((v1.x*v1.x + v1.y*v1.y + v1.z*v1.z )*(v2.x*v2.x + v2.y*v2.y + v2.z*v2.z)))*57.2957)
+end
+
+function vector_cross (v1, v2)
+    return vector ():set (v1.y  * v2.z  - v1.z  * v2.y, v1.z  * v2.x  - v1.x  * v2.z, v1.x  * v2.y  - v1.y  * v2.x)
+end
+
+--//Вращает вектор вокруг оси y против часовой стрелки
+
+function vector_rotate_y (v, angle)
+    angle = angle * 0.017453292519943295769236907684886
+    local c = math.cos (angle)
+    local s = math.sin (angle)
+    return vector ():set (v.x * c - v.z * s, v.y, v.x * s + v.z * c)
+end
+
+-- очистка таблицы
+function clear_table (t)
+    local table_remove = table.remove
+    while #t > 0 do
+          table_remove (t, #t)
+    end
+end
+
+function new_point(center_id, position_id,radius, min_radius)
+    local math_random = math.random
+    local dir = vector():set(math_random(-1000, 1000)/1000.0, 0.0001, math_random(-1000, 1000)/1000.0)
+    local pos = level.vertex_in_direction(center_id, dir, radius)
+    local i   = 1
+
+    while(level.vertex_position(position_id):distance_to(level.vertex_position(pos) ) < min_radius and i < 20) do
+        dir = vector():set(math_random(-1000, 1000)/1000.0, 0.0001, math_random(-1000, 1000)/1000.0)
+        pos = level.vertex_in_direction(center_id, dir, radius)
+        i   = i + 1
+    end
+
+    return (level.vertex_position(pos))
+end
+
+function stop_play_sound(obj)
+  if obj:alive() == true then
+    obj:set_sound_mask(-1)
+    obj:set_sound_mask(0)
+  end
+end
+
+function object_type(obj)
+    local otype = get_clsid(obj)
+    local type
+
+    if  otype == clsid.actor or
+        otype == clsid.script_stalker or
+        otype == clsid.script_trader
+    then
+        type = "stalker"
+    elseif  otype == clsid.crow or
+        otype == clsid.zombie or
+        otype == clsid.flesh or
+        otype == clsid.controller or
+        otype == clsid.bloodsucker or
+        otype == clsid.burer or
+        otype == clsid.fracture or
+        otype == clsid.chimera or
+        otype == clsid.boar or
+        otype == clsid.flesh_group or
+        otype == clsid.dog_red or
+        otype == clsid.dog_black or
+        otype == clsid.cat or
+        otype == clsid.pseudo_gigant
+    then
+        type = "monstr"
+    elseif  otype == clsid.wpn_fn2000 or
+        otype == clsid.wpn_ak74 or
+        otype == clsid.wpn_lr300 or
+        otype == clsid.wpn_hpsa or
+        otype == clsid.wpn_pm or
+        otype == clsid.wpn_fort or
+        otype == clsid.wpn_binocular or
+        otype == clsid.wpn_shotgun or
+        otype == clsid.wpn_svd or
+        otype == clsid.wpn_svu or
+        otype == clsid.wpn_rpg7 or
+        otype == clsid.wpn_val or
+        otype == clsid.wpn_vintorez or
+        otype == clsid.wpn_walther or
+        otype == clsid.wpn_usp45 or
+        otype == clsid.wpn_groza or
+        otype == clsid.wpn_knife or
+        otype == clsid.wpn_scope or
+        otype == clsid.wpn_silencer or
+        otype == clsid.wpn_grenade_launcher or
+        otype == clsid.obj_physic or
+        otype == clsid.obj_breakable or
+        otype == clsid.device_pda or
+        otype == clsid.device_torch or
+        otype == clsid.device_detector_simple or
+        otype == clsid.obj_bolt or
+        otype == clsid.obj_medkit or
+        otype == clsid.obj_food or
+        otype == clsid.obj_bottle or
+        otype == clsid.obj_antirad or
+        otype == clsid.obj_explosive or
+        otype == clsid.obj_document or
+        otype == clsid.obj_attachable or
+        otype == clsid.wpn_grenade_f1 or
+        otype == clsid.wpn_grenade_rpg7 or
+        otype == clsid.wpn_grenade_rgd5 or
+        otype == clsid.wpn_grenade_fake or
+        otype == clsid.equ_scientific or
+        otype == clsid.equ_stalker or
+        otype == clsid.equ_military or
+        otype == clsid.equ_exo or
+        otype == clsid.wpn_ammo or
+        otype == clsid.wpn_ammo_vog25 or
+        otype == clsid.wpn_ammo_og7b or
+        otype == clsid.wpn_ammo_m209
+    then
+        type = "item"
+    else
+        type = "none"
+    end
+
+    -- Їа®ўҐапҐ¬ ­Ґ вагЇ «Ё нв®
+    if type == "stalker" or
+       type == "monstr" then
+        if obj:alive() == false then
+            type = "corpse"
+        end
+    end
+
+    return type
+end
+
+
+--// Является ли оbj монстром
+function is_object_monster( obj )
+  if obj:is_monster() then
+    return true
+  end
+  return false
+end
+
+function point_with_bit(patrol_path, bit, old_point)      
+  local points = {}                                       
+
+    for i = 0, patrol_path:count()-1 do
+      if( patrol_path:flag(i, bit)) then
+            if old_point == nil or old_point ~= i then
+                table.insert(points, patrol_path:point(i))
+            end
+        end
+    end
+
+    local number_point = #points
+
+    if(number_point == 0) then
+        return nil
+    elseif(number_point == 1) then
+        return points[1]
+    else
+        return points[math.random(1, number_point)]
+    end
+end
+
+function point_with_bit_id(patrol_path, bit, old_point)        
+    local points = {}                                          
+
+    for i = 0, patrol_path:count()-1 do
+      if( patrol_path:flag(i, bit)) then
+            if old_point == nil or old_point ~= i then
+                table.insert(points, i)
+            end
+        end
+    end
+
+    local number_point = #(points)
+
+    if(number_point == 0) then
+        return nil
+    elseif(number_point == 1) then
+        return patrol_path:level_vertex_id(points[1])
+    else
+        return patrol_path:level_vertex_id(points[math.random(1, number_point)])
+    end
+end
+
+function near_point_with_bit(point, patrol_path, bit)
+    local new_point = nil
+    local index     = nil
+    local dist      = 1000.0
+
+    for i = 0, patrol_path:count()-1 do
+        if( patrol_path:flag(i, bit) ) then
+            if(new_point == nil or patrol_path:point(i):distance_to(point) < dist) then
+                new_point   = patrol_path:point(i)
+                index       = i
+                dist        = new_point:distance_to(point)
+             end
+        end
+    end
+
+    return index
+end
+
+function print_table(table, subs)
+  local sub
+  if subs ~= nil then
+    sub = subs
+  else
+    sub = ""
+  end
+  for k,v in pairs(table) do
+    if type(v) == "table" then
+      printf(sub.."%s:", tostring(k))
+      print_table(v, sub.."    ")
+    elseif type(v) == "function" then
+      printf(sub.."%s:function", tostring(k))
+    elseif type(v) == "userdata" then
+      printf(sub.."%s:userdata", tostring(k))
+    elseif type(v) == "boolean" then
+  if v == true then
+    printf(sub.."%s:true", tostring(k))
+  else
+    printf(sub.."%s:false", tostring(k))
+  end
+    else
+      if v ~= nil then
+        printf(sub.."%s:%s", tostring(k),v)
+      else
+        printf(sub.."%s:nil", tostring(k),v)
+      end
+    end
+  end
+end
+
+-------------------------------------------------------------------------------------------
+function switch_online (id)
+    if id == -1 then return end
+    local sim = ai
+    if sim ~= nil then
+       sim:set_switch_online  (id, true)
+       sim:set_switch_offline (id, false)
+    end
+end
+-------------------------------------------------------------------------------------------
+function switch_offline (npc)
+    if npc == nil or npc:alive () == false then return end
+    local sim = ai
+    if sim ~= nil then
+       sim:set_switch_online  (npc:id (), false)
+       sim:set_switch_offline (npc:id (), true)
+    end
+end
+-------------------------------------------------------------------------------------------
+function get_actor_id()
+  if(level.actor() == nil) then return -1 end
+  return level.actor():id()
+end
+-------------------------------------------------------------------------------------------
+
+function id_by_sid( sid )
+	local se_obj = ai:story_object( sid )
+	if se_obj then
+		return se_obj.id
+	end
+	return nil
+end
+
+function level_object_by_sid( sid )
+	local id = id_by_sid( sid )
+	if id then
+		return level.object_by_id(id)
+	end
+	return nil
+end
+
+
+function isRegisteredLevel(game_vertex_id)
+	local level_id = game_graph():vertex(game_vertex_id):level_id()
+	return (level_id > 0 and level_id < 24) -- при добавлении новых локаций увеличить счетчик
+end
+
+-- быстрый if
+function iif(t,t1,t2)
+	if t then
+		return t1
+	else
+		return t2
+	end
+end
+
+function set_postprocess(name_ini_file)
+  bind_stalker.post_process = postprocess.PostProcess(ini_file(name_ini_file))
+end
+function remove_postprocess()
+  bind_stalker.post_process = nil
+end
+
+function set_inactivate_input_time(delta)
+  db.storage[db.actor:id()].disable_input_time = game.get_game_time()
+  db.storage[db.actor:id()].disable_input_idle = delta
+  level.disable_input()
+end
+-- Принимает: позицию положения, позицию куда смотреть, время сна в минутах.
+function set_sleep_relocate(point, look, timeout)
+  db.storage[db.actor:id()].sleep_relocate_time = game.get_game_time()
+  db.storage[db.actor:id()].sleep_relocate_idle = timeout*60
+  db.storage[db.actor:id()].sleep_relocate_point = point
+  db.storage[db.actor:id()].sleep_relocate_look = look
+
+  --set_inactivate_input_time(timeout*60)
+  --db.actor:actor_sleep(0, timeout)
+end
+
+-- проверяет целую часть числа на нечётность
+function odd( x )
+  return math.floor( x * 0.5 ) * 2 == math.floor( x )
+end
+
+--' Усталость
+function on_actor_critical_power()
+  if has_info("esc_trader_newbie") then
+    game.start_tutorial("part_11_weakness")
+  end
+  if not has_info("encyclopedy_tutorial_weakness") then
+    db.actor:give_info_portion("encyclopedy_tutorial_weakness")
+  end
+end
+
+function on_actor_critical_max_power()
+end
+
+--' Кровотечение
+function on_actor_bleeding()
+  if has_info("esc_trader_newbie") then
+    game.start_tutorial("part_8_wound")
+  end
+  if not has_info("encyclopedy_tutorial_wound") then
+    db.actor:give_info_portion("encyclopedy_tutorial_wound")
+  end
+end
+
+function on_actor_satiety()
+end
+
+function on_actor_thirst() --Туториал на жажду
+end
+
+--' Радиация
+function on_actor_radiation()
+  if has_info("esc_trader_newbie") then
+    game.start_tutorial("part_6_radiation")
+  end
+  if not has_info("encyclopedy_tutorial_radiation") then
+    db.actor:give_info_portion("encyclopedy_tutorial_radiation")
+  end
+end
+
+--' Заклинило оружие
+function on_actor_weapon_jammed()
+  if has_info("esc_trader_newbie") then
+    game.start_tutorial("part_9_weapon")
+  end
+  if not has_info("encyclopedy_tutorial_weapon") then
+    db.actor:give_info_portion("encyclopedy_tutorial_weapon")
+  end
+end
+
+--' не может ходить изза веса
+function on_actor_cant_walk_weight()
+  if has_info("esc_trader_newbie") then
+    game.start_tutorial("part_14_overload")
+  end
+  if not has_info("encyclopedy_tutorial_overload") then
+    db.actor:give_info_portion("encyclopedy_tutorial_overload")
+  end
+end
+
+--' пси воздействие
+function on_actor_psy()
+end
+
+function set_actor_rank(rank)
+  if rank == "novice" then
+    db.actor:set_character_rank(0)
+  elseif rank == "stalker" then
+    db.actor:set_character_rank(300)
+  elseif rank == "veteran" then
+    db.actor:set_character_rank(600)
+  elseif rank == "master" then
+    db.actor:set_character_rank(900)
+  end
+end
+
+function get_texture_info(id_name, id_default)
+  if id_default == nil then id_default = id_name end
+
+  local task_info = GetTextureInfo(id_name, id_default)
+  local r = task_info:get_rect()
+
+  r.x2 = r.x2 - r.x1
+  r.y2 = r.y2 - r.y1
+  return task_info:get_file_name(), r
+end
+
+function start_game_callback()
+	init_all_classes()
+
+	-- это старые команды
+	cmd("unbind quick_save")
+	cmd("unbind_sec quick_save")
+
+	cmd("unbind quick_load")
+	cmd("unbind_sec quick_load")
+
+    ai = alife()
+	m_netpk.attach() -- инициализация модуля m_netpk
+
+	task_manager.clear_task_manager()
+	treasure_manager.clear_treasure_manager()
+	xr_sound.clear_all_sound_object()
+	dialog_manager.fill_phrase_table()
+
+	--AMK UTILS--
+	amk.on_game_start()
+	--AMK UTILS--
+
+	-- xStream -- sandbox init --
+	xs_sandbox.init()
+	event("game_start"):trigger()
+	--
+	--[[
+	if not is_debug_mode then
+		local cnt1 = 0
+		local cnt2 = 0
+		local cnt3 = 0
+		log1("Start scanning unpacked files...")
+		stdfs.recursive_directory_iterator(getFS():update_path("$game_config$",  ""), function(file) log3("~~Unpacked config file: [%s]", file.full_filename) cnt1 = cnt1 + 1 end)
+		stdfs.recursive_directory_iterator(getFS():update_path("$game_scripts$", ""), function(file) log3("~~Unpacked script file: [%s]", file.full_filename) cnt2 = cnt2 + 1 end)
+		stdfs.recursive_directory_iterator(getFS():update_path("$game_shaders$", ""), function(file) log3("~~Unpacked shader file: [%s]", file.full_filename) cnt3 = cnt3 + 1 end)
+		local total = cnt1 + cnt2 + cnt3
+		log3("Finishing scanning of unpacked files. Statistics: configs: [%s], scripts: [%s], shaders: [%s]. Total: [%s]", cnt1, cnt2, cnt3, total)
+	end
+	]]
+end
+-------------------------------------------------------------------------------------------
+local class_tbl_monster = {}
+local class_tbl_stalker = {}
+local class_tbl_anomaly = {}
+local class_tbl_weapons = {}
+local class_tbl_outfits = {}
+local class_tbl_ammo_grenade = {}
+local class_tbl_grenade = {}
+local class_tbl_artefact = {}
+local class_tbl_scopes = {}
+local class_tbl_silencers = {}
+local class_tbl_gl = {}
+local class_tbl_binoculars = {}
+local class_tbl_inv_boxes = {}
+local class_tbl_knifes = {}
+local class_tbl_lc = {}
+local class_tbl_ammo = {}
+local class_tbl_actor = {}
+IAmAStalker = {}
+IAmAMonster = {}
+IAmAWeapon = {}
+
+function init_all_classes()
+	class_tbl_monster = {
+		[clsid.bloodsucker] = true,
+		[clsid.boar] = true,
+		[clsid.dog_red] = true,
+		[clsid.dog_black] = true,
+		[clsid.flesh] = true,
+		[clsid.burer] = true,
+		[clsid.cat] = true,
+		[clsid.chimera] = true,
+		[clsid.controller] = true,
+		[clsid.fracture] = true,
+		[clsid.poltergeist] = true,
+		[clsid.zombie] = true,
+		[clsid.snork] = true,
+		[clsid.tushkano] = true,
+		[clsid.psy_dog] = true,
+		[clsid.psy_dog_phantom] = true,
+		[clsid.pseudo_gigant] = true,
+		[clsid.bloodsucker_s] = true,
+		[clsid.boar_s] = true,
+		[clsid.dog_s] = true,
+		[clsid.flesh_s] = true,
+		[clsid.pseudodog_s] = true,
+		[clsid.burer_s] = true,
+		[clsid.cat_s] = true,
+		[clsid.chimera_s] = true,
+		[clsid.controller_s] = true,
+		[clsid.fracture_s] = true,
+		[clsid.poltergeist_s] = true,
+		[clsid.gigant_s] = true,
+		[clsid.zombie_s] = true,
+		[clsid.snork_s] = true,
+		[clsid.tushkano_s] = true,
+		[clsid.psy_dog_s] = true,
+		[clsid.psy_dog_phantom_s] = true
+	}
+	class_tbl_stalker = {
+		[clsid.actor] = true,
+		[clsid.script_stalker] = true
+	}
+	class_tbl_anomaly = {
+		[clsid.zone_acid_fog] = true,
+		[clsid.zone_bfuzz] = true,
+		[clsid.zone_bfuzz_s] = true,
+		[clsid.zone_dead] = true,
+		[clsid.zone_galant_s] = true,
+		[clsid.zone_galantine] = true,
+		[clsid.zone_mbald_s] = true,
+		[clsid.zone_mincer] = true,
+		[clsid.zone_mincer_s] = true,
+		[clsid.zone_mosquito_bald] = true,
+		[clsid.ameba_zone] = true,
+		[clsid.zone_rusty_hair] = true,
+		[clsid.torrid_zone] = true,
+		[clsid.zone_radioactive] = true
+	}
+	class_tbl_weapons = {
+		[clsid.wpn_ak74] = true,
+		[clsid.wpn_ak74_s] = true,
+		[clsid.wpn_binocular] = true,
+		[clsid.wpn_binocular_s] = true,
+		[clsid.wpn_bm16] = true,
+		[clsid.wpn_bm16_s] = true,
+		[clsid.wpn_fn2000] = true,
+		[clsid.wpn_fort] = true,
+		[clsid.wpn_grenade_f1] = true,
+		[clsid.wpn_grenade_fake] = true,
+		[clsid.wpn_grenade_launcher] = true,
+		[clsid.wpn_grenade_rgd5] = true,
+		[clsid.wpn_grenade_rpg7] = true,
+		[clsid.wpn_groza] = true,
+		[clsid.wpn_groza_s] = true,
+		[clsid.wpn_hpsa] = true,
+		[clsid.wpn_hpsa_s] = true,
+		[clsid.wpn_knife] = true,
+		[clsid.wpn_knife_s] = true,
+		[clsid.wpn_lr300] = true,
+		[clsid.wpn_lr300_s] = true,
+		[clsid.wpn_mounted] = true,
+		[clsid.wpn_pm] = true,
+		[clsid.wpn_pm_s] = true,
+		[clsid.wpn_rg6] = true,
+		[clsid.wpn_rg6_s] = true,
+		[clsid.wpn_rpg7] = true,
+		[clsid.wpn_rpg7_s] = true,
+		[clsid.wpn_shotgun] = true,
+		[clsid.wpn_shotgun_s] = true,
+		[clsid.wpn_winchester1300] = true,
+		[clsid.wpn_winchester1300_s] = true,
+		[clsid.wpn_stat_mgun] = true,
+		[clsid.wpn_svd] = true,
+		[clsid.wpn_svd_s] = true,
+		[clsid.wpn_svu] = true,
+		[clsid.wpn_svu_s] = true,
+		[clsid.wpn_usp45] = true,
+		[clsid.wpn_usp45_s] = true,
+		[clsid.wpn_val] = true,
+		[clsid.wpn_val_s] = true,
+		[clsid.wpn_vintorez] = true,
+		[clsid.wpn_vintorez_s] = true,
+		[clsid.wpn_walther] = true,
+		[clsid.wpn_walther_s] = true
+	}
+	class_tbl_outfits = {
+		[clsid.equ_exo] = true,
+		[clsid.equ_military] = true,
+		[clsid.equ_scientific] = true,
+		[clsid.equ_stalker] = true,
+		[clsid.equ_stalker_s] = true
+	}
+	class_tbl_ammo_grenade = {
+		[clsid.wpn_ammo_m209] = true,
+		[clsid.wpn_ammo_vog25] = true,
+		[clsid.wpn_ammo_og7b] = true
+	}
+	class_tbl_grenade = {
+		[clsid.wpn_grenade_f1] = true,
+		[clsid.wpn_grenade_rgd5] = true
+	}
+	class_tbl_artefact = {
+		[clsid.artefact] = true,
+		[clsid.artefact_s] = true
+	}
+	class_tbl_scopes = {
+		[clsid.wpn_scope] = true,
+		[clsid.wpn_scope_s] = true
+	}
+	class_tbl_silencers = {
+		[clsid.wpn_silencer] = true
+	}
+	class_tbl_gl = {
+		[clsid.wpn_grenade_launcher] = true
+	}
+	class_tbl_binoculars = {
+		[clsid.wpn_binocular] = true,
+		[clsid.wpn_binocular_s] = true
+	}
+	class_tbl_inv_boxes = {
+		[clsid.inventory_box] = true,
+		[clsid.inventory_container] = true
+	}
+	class_tbl_knifes = {
+		[clsid.wpn_knife] = true,
+		[clsid.wpn_knife_s] = true
+	}
+	class_tbl_lc = {
+		[clsid.level_changer] = true
+	}
+	class_tbl_ammo = {
+		[clsid.wpn_ammo] = true
+	}
+	class_tbl_actor = {
+		[clsid.actor] = true
+	}
+
+	-- Старые таблицы
+	IAmAStalker = class_tbl_stalker
+	IAmAMonster = {
+		[clsid.boar_s] = true,
+		[clsid.bloodsucker_s] = true,
+		[clsid.dog_s] = true,
+		[clsid.flesh_s] = true,
+		[clsid.pseudodog_s] = true,
+		[clsid.psy_dog_s] = true,
+		[clsid.burer_s] = true,
+		[clsid.cat_s] = true,
+		[clsid.chimera_s] = true,
+		[clsid.controller_s] = true,
+		[clsid.fracture_s] = true,
+		[clsid.poltergeist_s] = true,
+		[clsid.gigant_s] = true,
+		[clsid.zombie_s] = true,
+		[clsid.tushkano_s] = true,
+		[clsid.snork_s] = true
+	}
+	IAmAWeapon = {
+		[clsid.wpn_ak74_s] = true,
+		[clsid.wpn_bm16_s] = true,
+		[clsid.wpn_grenade_f1] = true,
+		[clsid.wpn_grenade_fake] = true,
+		[clsid.wpn_grenade_launcher] = true,
+		[clsid.wpn_grenade_rgd5] = true,
+		[clsid.wpn_grenade_rpg7] = true,
+		[clsid.wpn_groza_s] = true,
+		[clsid.wpn_hpsa_s] = true,
+		[clsid.wpn_knife_s] = true,
+		[clsid.wpn_lr300_s] = true,
+		[clsid.wpn_pm_s] = true,
+		[clsid.wpn_rpg7_s] = true,
+		[clsid.wpn_shotgun_s] = true,
+		[clsid.wpn_svd_s] = true,
+		[clsid.wpn_svu_s] = true,
+		[clsid.wpn_usp45_s] = true,
+		[clsid.wpn_val_s] = true,
+		[clsid.wpn_vintorez_s] = true,
+		[clsid.wpn_walther_s] = true
+	}
+	-- log1("[_G]: All classes tables are initialized.")
+end
+-------------------------------------------------------------------------------------------
+-- Функции проверки типа объекта по его классу
+function IsMonster(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_monster[id]
+end
+
+function IsActor(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_actor[id]
+end
+
+function IsStalker(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_stalker[id]
+end
+
+function IsAnomaly(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_anomaly[id]
+end
+
+function isWeapon(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_weapons[id]
+end
+
+function isAmmo(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_ammo[id]
+end
+
+function isOutfit(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_outfits[id]
+end
+
+function isLc(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_lc[id]
+end
+
+function isKnife(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_knifes[id]
+end
+
+function IsInventoryBox(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_inv_boxes[id]
+end
+
+function IsBinocular(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_binoculars[id]
+end
+
+function IsGrenadeLauncher(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_gl[id]
+end
+
+function IsScope(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_scopes[id]
+end
+
+function IsSilencer(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_silencers[id]
+end
+
+function IsAmmoGrenade(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_ammo_grenade[id]
+end
+
+function isWeaponGrenade(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_grenade[id]
+end
+
+function isArtefact(object, class_id)
+	local id = class_id or get_clsid(object)
+	return id and class_tbl_artefact[id]
+end
+
+function ammo_section(section)
+	if sys_ini:line_exist(section, "class") then
+		return sys_ini:r_string(section, "class") == "AMMO"
+	end
+end
+
+-- служебные функции для чтения параметров из секций объектов
+
+function get_string(section, param, def_val, ini_file)
+	local ini = ini_file or sys_ini
+	ASSERT(ini:section_exist(section), "get_string: section '"..section.."' doesn't exist")
+	if ini:line_exist(section, param) then
+		return ini:r_string(section, param)
+	else
+		return def_val
+	end
+end
+
+function get_string_wq(section, param, def_val, ini_file)
+	local ini = ini_file or sys_ini
+	ASSERT(ini:section_exist(section), "get_string: section '"..section.."' doesn't exist")
+	if ini:line_exist(section, param) then
+		return ini:r_string_wq(section, param)
+	else
+		return def_val
+	end
+end
+
+function get_u32(section, param, def_val, ini_file)
+	local ini = ini_file or sys_ini
+	ASSERT(ini:section_exist(section), "get_u32: section '"..section.."' doesn't exist")
+	if ini:line_exist(section, param) then
+		return ini:r_u32(section, param)
+	else
+		return def_val
+	end
+end
+
+function get_bool(section, param, def_val, ini_file)
+	local ini = ini_file or sys_ini
+	ASSERT(ini:section_exist(section), "get_bool: section '"..section.."' doesn't exist")
+	if ini:line_exist(section, param) then
+		return ini:r_bool(section, param)
+	else
+		return not (not def_val)
+	end
+end
+
+function get_float(section, param, def_val, ini_file)
+	local ini = ini_file or sys_ini
+	ASSERT(ini:section_exist(section), "get_float: section '"..section.."' doesn't exist")
+	if ini:line_exist(section, param) then
+		return ini:r_float(section, param)
+	else
+		return def_val
+	end
+end
+
+-- получить класс из секции, полезно в том случае, если нет объекта (и недоступен метод clsid), а есть только имя секции
+function get_class(section)
+	ASSERT(sys_ini:section_exist(section), "get_class: section '"..section.."' doesn't exist")
+	ASSERT(sys_ini:line_exist(section, "class"), "get_class: there is no 'class' parameter in the section '"..section.."'")
+	return sys_ini:r_clsid(section, "class")
+end
+
+function split_comma_separated_list(s)
+	return string.explode(",", s)
+end
+
+-- читает время, сохранённое в виде строки со значениями, разделёнными запятой, и конвертирует в значение класса CTime
+function unpack_time_from_string(str_time)
+	local time_values = {}
+	for i,s in ipairs(split_comma_separated_list(str_time)) do
+		local value = tonumber(s)
+		ASSERT(value, "unpack_time_from_string: problem with unpacking saved time '%s', value #%d (%s)", str_time, i, s)
+		table.insert(time_values, value)
+	end
+	ASSERT(#time_values == 7, "unpack_time_from_string: packed time '%s' has wrong number of components. Must be equal to seven.")
+	local res = game.CTime()
+	res:set(unpack(time_values))
+	return res
+end
+
+-- упаковать время в виде объекта CTime в строку значений, разделённых запятой
+function pack_time_to_string(t)
+	ASSERT(t, "pack_time_to_string: t is a nil reference")
+	return table.concat({t:get()}, ",")
+end
+
+function create_ammo(s, pos, lv, gv, id, bs)
+return ai:create_ammo(s, pos, lv, gv, id, bs)
+end
+
+function safely_create(sect, pos, lv, gv, id)
+	if not sys_ini:section_exist(sect) then log1("! Can't find section: " .. tostring(sect)) return end
+	return create(sect, pos, lv, gv, id)
+end
+
+function safely_create_ammo(sect, pos, lv, gv, id, bs)
+	if not sys_ini:section_exist(sect) then log1("! Can't find section: " .. tostring(sect)) return end
+	return create_ammo(sect, pos, lv, gv, id, bs)
+end
+
+function create_no_ai(...)
+	local sobj = create(...)
+	local _sobj = ai:object(sobj.id)
+	_sobj:used_ai_locations(false)
+	return sobj
+end
+
+function create_ammo_no_ai(...)
+	local sobj = create_ammo(...)
+	local _sobj = ai:object(sobj.id)
+	_sobj:used_ai_locations(false)
+	return sobj
+end
+
+-- из ОП-2.1
+-- Вместо alife():release(), alife():release(alife():object(id|name)) со всеми проверками.
+-- В качестве параметра можно передавать серверный объект, клиентский объект и просто id. Для объектов алспауна можно передавать name.
+function release(o)
+	if not o then return end
+
+	if type(o) ~= "userdata" then		-- id или name
+		local o = ai:object(o)
+		if o then ai:release(o) end
+	elseif o.section_name then			-- серверный объект
+		ai:release(o)
+	else								-- клиентский объект
+		local o = ai:object(o:id())
+		if o then ai:release(o) end
+	end
+end
+
+-- Спавн секции в инвентарь актора без вывода сообщения
+function got_item(s, c)
+	local obj
+	for i = 1, c or 1 do
+		obj = create(s, vector():set(0, 0, 0), 0, 0, 0)
+	end
+	return obj
+end
+
+function set_item_allow_sprint(item, bool)
+	local f = item:get_inventory_item_flags()
+	f:set(global_flags.FAllowSprint, bool)
+	item:set_inventory_item_flags(f)
+end
+
+function set_outfit_additional_inventory_weight(obj, val)
+	obj:set_additional_max_walk_weight(val)
+end
+
+function set_outfit_additional_inventory_weight2(obj, val)
+	obj:set_additional_max_weight(val)
+end
+
+function set_default_outfit_additional_inventory_weight(obj)
+	local val = sys_ini:r_float(obj:section(), "additional_inventory_weight")
+	obj:set_additional_max_walk_weight(val)
+end
+
+function set_default_outfit_additional_inventory_weight2(obj)
+	local val = sys_ini:r_float(obj:section(), "additional_inventory_weight2")
+	obj:set_additional_max_weight(val)
+end
+
+function is_client_obj(o)
+	if o and type(o) == "userdata" and not o.section_name then return true end
+	return false
+end
+
+-- сделать предмет безусловно негруппируемым в окнах инвентаря
+function set_item_ungroupable( item )
+  local f = item:get_inventory_item_flags()
+  f:set( global_flags.FIUngroupable, true )
+  item:set_inventory_item_flags( f )
+end
+
+-- сделать предмет безусловно непродаваемым, будет показан красным. Для
+-- избежания глюков надо также выключать группируемость для этого предмета.
+function set_item_always_untradable( item )
+  local f = item:get_inventory_item_flags()
+  f:set( global_flags.FIAlwaysUntradable, true )
+  item:set_inventory_item_flags( f )
+end
+
+-- включить движковую группировку для предмета
+function set_item_default_grouping( item )
+  local f = item:get_inventory_item_flags()
+  f:set( global_flags.FIUngroupable, false )
+  item:set_inventory_item_flags( f )
+end
+
+-- убрать принудительную неторгуемость и негруппирумость и оставить только
+-- движковый алгоритм
+function set_item_default_tradability( item )
+  local f = item:get_inventory_item_flags()
+  f:set( global_flags.FIAlwaysUntradable, false )
+  item:set_inventory_item_flags( f )
+end
+
+function set_item_always_ungroupable( obj, flag )
+  obj:get_inventory_item().always_ungroupable = flag
+end
+
+local in_levels = {
+	["av_peshera"] = true,
+	["jupiter_underground"] = true,
+	["l03u_agr_underground"] = true,
+	["l04u_labx18"] = true,
+	["l08u_brainlab"] = true,
+	["l10u_bunker"] = true,
+	["l12u_control_monolith"] = true,
+	["l12u_sarcofag"] = true,
+	["labx8"] = true,
+	["peshera"] = true,
+	["warlab"] = true
+}
+
+function isIndoor(ln)
+	ln = ln or level.name()
+	return in_levels[ln]
+end
+
+-- Prophet13: Вместо ai:create, все варианты
+-- Аргументы (секция, вектор, lv, gv, id объекта (если выдаёте в тайник или инвентарь НПС))
+function create(...)
+  local dobj = ai:create(...)
+  if dobj and dobj.id and dobj.position then
+      MClientOnEvents.OnESpawned(dobj.id, ...)
+  end
+  return dobj
+end
+
+--Prophet13: Движковый метод для создания патронов.
+function create_ammo(sect, pos, lv, gv, id, bs)
+return ai:create_ammo(sect, pos, lv, gv, id, bs)
+end
+
+-- Prophet13: Единые и комфортные в написании функции взаимодействия с актором.
+-- Вместо db.actor:object()
+function actor_object(o)
+return db.actor:object(o)
+end
+
+-- Проверка инфопоршня, даже если актор не инициализирован
+function has_info(i)
+return ai:has_info(0, i)
+end
+
+-- Выдаём инфопоршень
+function give_info(i)
+  MClientOnEvents.OnIGetInfo(i, 1)
+  return db.actor:give_info_portion(i)
+end
+
+-- Выключаем инфопоршень
+function disable_info(i)
+MClientOnEvents.OnIGetInfo(i, 0)
+return db.actor:disable_info_portion(i)
+end
+
+-- Выдаём предмет с выводом новости (без новости используем got_item)
+function got(s, n)
+	if not n then n = 1 end
+	if not sys_ini:section_exist(s) then log1("[_G.got] Can't find section: "..tostring(s)) return end
+	for i = 1, n do
+	    create(s, vector(), 0, 0, db.actor:id())
+	end
+	news_manager.relocate_item(db.actor, "in", s, n)
+end
+
+-- Проверяем, есть ли нужное кол-во предметов
+function has(s, n)
+--[=[
+    if not n then n = 1 end
+	if not sys_ini:section_exist(s) then log1("![_G.has] Can't find section: "..tostring(s)) return end
+    local c = 0
+	db.actor:iterate_inventory(function(d, o)
+		if o and o:section() == s then
+			c = c + 1
+		end
+	end)
+    return c >= n
+--]=]
+	return amk_utils.inventory_search(s, n or 1)
+end
+
+-- Prophet13: Деньги
+function has_money(m)
+return db.actor:money()>=m
+end
+function got_money(m)
+	db.actor:give_money(m)
+	game_stats.money_quest_update(m)
+	news_manager.relocate_money(db.actor, "in", m)
+end
+function lost_money(m)
+	db.actor:give_money(-m)
+	game_stats.money_quest_update(-m)
+	news_manager.relocate_money(db.actor, "out", m)
+end
+
+-- Отбираем предмет с выводом новости.
+function lost(s, n)
+    if not n then n = 1 end
+	local c = 0
+	if not sys_ini:section_exist(s) then log1("![_G.lost] Can't find section: "..tostring(s)) return end
+	db.actor:iterate_inventory(
+	    function(d, o)
+	        if o and o:section() == s and c < n then
+	    	   release(o)
+	    	   c = c + 1
+	    	end
+	    end)
+	if c < n then log3("![_G.lost] Number of deleted objects doesn't match with required. Required: [%s], Deleted: [%s], Section: [%s]", n, c, s) end
+    news_manager.relocate_item(db.actor, "out", s, n)
+end
+
+-- Отбираем все предметы, у которых секция s. Нужно, когда их количество в инвентаре неизвестно.
+function lost_all(s)
+    if not sys_ini:section_exist(s) then log1("![_G.lost_all] Can't find section: "..tostring(s)) return end
+	local c = 0
+	db.actor:iterate_inventory(
+		function(d, o)
+			if o and o:section() == s and (IAmAStalker[o.clsid] or IAmAMonster[o.clsid]) then
+				release(o)
+				c = c + 1
+			end
+		end)
+	if c > 0 then
+		news_manager.relocate_item(db.actor, "out", s, c)
+	end
+end
+
+-- Это использовать только при разовых указаниях позиции для create и т.п. Для всего остального использовать свой экземпляр класса vector().
+pos_only = vector()
+function xyz(...) return pos_only:set(...) end
+
+-- Проиграть звук
+function say(s)
+	voice(s):play_no_feedback(db.actor, sound_object.s2d, 0, vector():set(0,0,0), 1.0)
+end
+
+-- Prophet13: Перенесено из amk.script
+local rsfm_timer
+function map_rem(o, t)
+  if rsfm_timer then
+  rsfm_timer:stop()
+  rsfm_timer = nil
+  end
+  level.map_remove_object_spot(o, t)
+  if map_has(o, t) == 0 then return end
+  if o then
+      rsfm_timer = dsh.wait_condition(
+      function()
+      level.map_remove_object_spot(o, t)
+      return map_has(o, t) == 0
+      end,
+      function() rsfm_timer = nil end,
+      function() ogse_signals.get_mgr():reschedule(10) end
+      )
+  end
+end
+
+function pcreate(s,c,id)
+	for i = 1, c do
+		create(s,xyz(0,0,0),0,0,id)
+	end
+end
+
+function on_release_callback(o)
+	local n = o:name()
+	-- log2("~~[_G]: release: [%s]", n)
+	-- ASSERT(n ~= "gar_hellcar", "Trying remove gar_hellcar!")
+	ASSERT(n ~= "yantar_ecolog_general", "Trying remove yantar_ecolog_general!")
+	if n == "rabi" and o:alive() then
+		abort("Trying remove rabi!")
+	end
+	if n == "sim_stalker_fraer" then
+		for id, sobj in alife():objects() do
+			if sobj.parent_id == o.id and sobj:section_name() == "fraer_pda" then
+				abort("Trying remove sim_stalker_fraer!")
+			end
+		end
+	end
+	if n == "francuz" then
+		for id, sobj in alife():objects() do
+			if sobj.parent_id == o.id and sobj:section_name() == "pda_francuz" then
+				abort("Trying remove francuz!")
+			end
+		end
+	end
+	if n == "brat_luis" and not has_info("brat_luis_have") then
+		abort("Trying remove brat_luis!")
+	end
+end
+
+--' получение иконки предмета для give_talk_message и give_game_news
+function get_item_icon(item)
+	return Frect():set(
+		sys_ini:r_u32(item, "inv_grid_x")*50,
+		sys_ini:r_u32(item, "inv_grid_y")*50,
+		sys_ini:r_u32(item, "inv_grid_width")*50,
+		sys_ini:r_u32(item, "inv_grid_height")*50)
+end
+
+function validate_enemy_object( enemy )
+  if not ( enemy and enemy.clsid ) then return false, nil end
+  if not ( IsStalker( enemy ) or IsMonster( enemy) ) then 
+    return false, nil
+  end
+  if enemy.health == nil or enemy.health <= 0 then 
+    return false, nil
+  end
+  -- это грязный хак чтобы выяснить не попался ли нам серверный объект
+  if enemy.m_story_id ~= nil then
+    local id = enemy.id
+    local enemy_gameobj = level.object_by_id( id )
+    if not enemy_gameobj then
+      return false, nil
+    else	
+      return true, enemy_gameobj
+    end
+  else	
+    return true, enemy
+  end
+end
+
+function remove_memory_object( npc, enemy )
+  local be = npc:best_enemy()
+  if be and be:id() == enemy:id() and xr_wounded.is_wounded( enemy ) then
+    return
+  end
+  npc:remove_memory_object( enemy )
+end
+
+function disable_memory_object( npc, enemy )
+  local be = npc:best_enemy()
+  if be and be:id() == enemy:id() and xr_wounded.is_wounded( enemy ) then
+    return
+  end
+  npc:enable_memory_object( enemy, false )
+end
+
+function enable_memory_object( npc, enemy )
+  npc:enable_memory_object( enemy, true )
+end

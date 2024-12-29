@@ -1,0 +1,174 @@
+class "MClientEntityManager"
+AllServerEntitesRCV = {}
+-- Просто вызывает смерть нпс. Потом надо сделать по нормальному
+function Kill(ID)
+	if type(ID) ~= "number" then
+		if ID.id then
+			local anpc = level.object_by_id(ID.id)
+			if anpc then 
+				AllServerEntitesRCV[anpc:id()] = nil
+				anpc:kill(anpc)
+				log1("[Client] S НПС с ID: " .. tostring(anpc:id()) .. " СДОХ НА СЕРВЕРЕ")
+			else 
+				log1("[Client] Не удалось убить нпс. Nil")
+			end
+		elseif ID:id() then
+			AllServerEntitesRCV[ID:id()] = nil
+			ID:kill(ID) -- ID это npc. В данном случае = obj
+			log1("[Client] OBJ НПС с ID: " .. tostring(ID:id()) .. " СДОХ НА СЕРВЕРЕ")
+		else
+			log1("[Client] Это не Игровой объект. ID = nil")
+		end
+	else
+		local itnpc = level.object_by_id(ID)
+		log1("[Client] ID НПС с ID: " .. tostring(ID) .. " СДОХ НА СЕРВЕРЕ")
+		if itnpc then
+			AllServerEntitesRCV[itnpc:id()] = nil
+			itnpc:kill(itnpc)
+		end
+	end
+end
+
+-- Используется для убийства всех npc которые умерли на сервере при подключении
+-- Перезаписи информации. И Обновление позиций
+-- Когда сервер отправил id всех мертвых npc. То клиент должен сделать мертвыми их тоже
+function OverwriteData(NETPAK)
+	log1("[HostClient] Идёт перезапись данных об объектах...")
+	news_manager.send_tip(db.actor, "Идёт перезапись данных об объектах...", nil, "nano", 20000)
+	if NETPAK and NETPAK.DONE then
+		news_manager.send_tip(db.actor, "Перезапись и добавление отправленных объектов завершена", nil, "nano", 20000)
+		log1("[HostClient] Перезапись и добавление отправленных объектов завершена")
+		for id=1, 65534 do
+			npcda = level.object_by_id(id)
+			npcad = alife():object(id)
+			if npcda and npcad and not AllServerEntitesRCV[id] and not IsItPlayer(id) then
+				Kill(id)
+			end
+		end
+		log1("[HostClient] Удаление npc в клиенте, которых нет на сервере завершенно")
+		news_manager.send_tip(db.actor, "Удаление npc в клиенте, которых нет на сервере завершенно", nil, "nano", 20000)
+		return
+	end
+	for id, data in pairs(NETPAK) do
+		npc = level.object_by_id(id)
+		npcda = alife():object(id)
+
+		-- Если в игре нет объекта с этим id но он был заспавнен принудительно
+		if not npc and not npcda and AllServerEntitesRCV[id] then
+			npc = level.object_by_id(AllServerEntitesRCV[id])
+			npcda = alife():object(AllServerEntitesRCV[id])
+		end
+
+		if npc and npcda then -- если у нас есть объект обновляем данные о нём
+			if data.ObjType == 1 then
+				log1("[Client] Идёт перезапись информации сталкера")
+				MClientCalls.Teleport(npcda, MMPDefs.ConvertToVector(data.Position), data.AreaID, data.AreaID2)
+				if data.isDead then 
+					Kill(id)
+				else
+					amk.write_stalker_params(data.Params, npcda) 
+					npc:set_dest_level_vertex_id(data.AreaID)
+				end
+			elseif data.ObjType == 2 then
+				log1("[Client] Идёт перезапись информации монстра")
+				MClientCalls.Teleport(npcda, MMPDefs.ConvertToVector(data.Position), data.AreaID, data.AreaID2)
+				if data.isDead then 
+					Kill(id)
+				else 
+					amk.write_monster_params(data.Params, npcda)
+					npc:set_dest_level_vertex_id(data.AreaID)
+				end
+			elseif data.ObjType == 3 then
+				log1("[Client] Идёт перезапись информации спавнера")
+				amk.set_spawner_data(data.Params, npcda)
+			else
+				log1("[Client] С этим объект на данный момент ничего не сделать. Не решено")
+			end
+			AllServerEntitesRCV[id] = id
+		elseif not data.isDead and not AllServerEntitesRCV[id] then -- Создаем npc. Правда alife спавн вещей нужно будет добавить
+			log1("[Client] Объект отсутствует. Создаем.")
+			local obj = ai:create(data.Section, MMPDefs.ConvertToVector(data.Position), data.AreaID, data.AreaID2)
+			obj.id = id
+			AllServerEntitesRCV[id] = obj.id
+		end
+	end
+	-- Ждём когда все объекты появятся и обновятся, А также ставим дистанцию активизации.
+	dsh.timeout(1000,
+		function()
+			alife():set_switch_distance(100000000)
+		end
+	)
+end
+
+function UpdateEntityes(NETPAK)
+	for id, data in pairs(NETPAK) do
+		local itnpc = level.object_by_id(id)
+		
+		-- Если в игре нет объекта с этим id но он был заспавнен принудительно
+		if not npc and not npcda and AllServerEntitesRCV[id] then 
+			itnpc = level.object_by_id(AllServerEntitesRCV[id])
+		end
+		
+		if itnpc then
+			local mpos = MMPDefs.ConvertToVector(data.Position)
+			local Distance = MMPDefs.Distance(mpos, itnpc:position())
+			-- Типа движение плавно или телепортировать
+			if Distance > 4 then
+				itnpc:set_npc_position(mpos)
+			end
+			-- Тут сетка.. пригодится
+			itnpc:set_dest_level_vertex_id(data.AreaID)
+			itnpc:set_sight(look.direction, MMPDefs.ConvertToVector(data.Rotation))
+			AllServerEntitesRCV[id] = id
+		elseif not data.isDead and not AllServerEntitesRCV[id] then -- Создаем npc. Правда alife спавн вещей нужно будет добавить
+			log1("[Client] Объект отсутствует. Создаем.")
+			local obj = ai:create(data.Section, MMPDefs.ConvertToVector(data.Position), data.AreaID, data.AreaID2)
+			obj.id = id
+			AllServerEntitesRCV[id] = obj.id
+		end
+	end
+end
+
+function SendHitByID(CLID, EData)
+	local npc = level.object_by_id(EData.WhoIT.id)
+	if npc then
+		log1("[Client] Игрок с ID".. tostring(CLID).. " задамажил НПС с ID " .. tostring(EData.WhoIT.id).. " на ".. tostring(EData.AmmountDrain))
+		npc.health = npc.health - EData.AmmountDrain
+	end
+end
+
+function IsItPlayer(LOCALID)
+	for UselessPort, vDA in pairs(MClient.SpawnedPlayers) do
+		if vDA.NPC == LOCALID then
+			return true
+		end
+	end
+	return false
+end
+
+-- Типа если заспавнился нпс то спавним его с данным ID
+function SpawnEvent(EData)
+	if EData and EData.id and EData.position and EData.AreaID and EData.AreaID2 and EData.section then
+		local obdasd
+		if EData.Where and EData.Where == db.actor:id() then return end
+		if EData.Where then
+			local MyWhere = alife():object(EData.Where)
+			if MyWhere then
+				if EData.Ammount then
+					obdasd = ai:create(EData.section, MMPDefs.ConvertToVector(EData.position), EData.AreaID, EData.AreaID2, EData.Where, EData.Ammount)
+					log1("[Client] Добавляем вещь в инвентарь/контейнер. Колличество: ".. tostring(EData.Ammount))
+				else
+					obdasd = ai:create(EData.section, MMPDefs.ConvertToVector(EData.position), EData.AreaID, EData.AreaID2, EData.Where)
+					log1("[Client] Добавляем вещь в инвентарь/контейнер")
+				end
+			else
+				log1("[Client] Ошибка добавления предмета в инвентарь/контейнер. Похоже нет alife объекта с данным ID")
+			end
+		else
+			obdasd = ai:create(EData.section, MMPDefs.ConvertToVector(EData.position), EData.AreaID, EData.AreaID2)
+			log1("[Client] Сервер отправил информацию, что появился новый NPC... Но клиент его не имеет. Создаём.")
+		end
+	else
+		log1("[Client] Ошибка созднания нового NPC, т.к нпс с таким же id уже существует.")
+	end
+end

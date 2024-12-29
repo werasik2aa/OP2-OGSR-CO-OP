@@ -1,0 +1,211 @@
+class "MClientPlayerManager"
+DropedItems = {}
+function SpawnPlayer(PlData)
+	-- Удаляем ебучию копию модели персонажа
+	if MClient.SpawnedPlayers[CLID] and MClient.SpawnedPlayers[CLID].NPC then
+		DespawnPlayer(PlData)
+	end
+	log1("[Client] Спавним модель игрока")
+	log1("[Client] Визуальный стиль => "..PlData.TemplateName)
+	log1("[Client] Позиция => "..tostring(PlData.Position.X) .. " " .. tostring(PlData.Position.Y).. " " .. tostring(PlData.Position.Z))
+	
+	local spanded = ai:create(PlData.TemplateName, MMPDefs.ConvertToVector(PlData.Position), PlData.AreaID, PlData.AreaID2)
+	spanded = ai:object(spanded.id)
+	spanded:used_ai_locations(false)
+	spanded.character_name = PlData.Name
+	MClient.SpawnedPlayers[PlData.ID] = {
+		MainInfo = PlData,
+		NPC = spanded.id
+	}
+	map_add(spanded.id, "treasure", "Player: " .. PlData.Name)
+end
+
+function UpdateGun(npc, GunParsed)
+	if npc and GunParsed then
+		if GunParsed.section ~= "" then
+			local wpn = npc:best_weapon()
+			if wpn and wpn:get_weapon() then
+				if wpn:section() ~= GunParsed.section then
+					log1("[Client] У клиента в руках другое оружие: "..tostring(GunParsed.section))
+					release(wpn) -- Убираем его дрын
+					amk.spawn_item_in_inv(tostring(GunParsed.section), npc) -- Спавним пушку. Для настоящих любителей
+					npc:best_weapon()
+				end
+			end
+		end
+	end
+end
+-- Убиваем модель игрока и убираем метку. Всё смерть. Или всё отключился
+function DespawnPlayer(EDATA)
+	if MClient.SpawnedPlayers[EDATA.ID] ~= nil then
+		local npc = level.object_by_id(MClient.SpawnedPlayers[EDATA.ID].NPC)
+		if npc then
+			npc:kill(npc)
+			map_rem(MClient.SpawnedPlayers[EDATA.ID].NPC, "treasure")
+		end
+		MClient.SpawnedPlayers[EDATA.ID] = nil
+	end
+end
+
+function UpdateOutFit(npc, OutfitParsed)
+	if npc and OutfitParsed and OutfitParsed.section ~= "" then
+		local outfitr = npc:get_current_outfit()
+		if outfitr and outfitr.section ~= OutfitParsed.section then
+			release(outfitr)
+			amk.spawn_item_in_inv(tostring(OutfitParsed.section), npc) -- Спавним костюм. Для настоящих любителей
+		end
+	end
+end
+
+-- ВСЁ СВЯЗАНОЕ С ИГРОКАМИ
+-- Позиции игроков
+function UpdatePlayerDatas()
+	if MClient.isClient then
+		for port, v in pairs(MClient.SpawnedPlayers) do
+			if port and v.MainInfo then
+				local npc = level.object_by_id(v.NPC)
+				local snpc = alife():object(v.NPC)
+				if npc and snpc and v.MainInfo.Position then
+					local mrot = MMPDefs.ConvertToVector(v.MainInfo.Rotation)
+					local mpos = MMPDefs.ConvertToVector(v.MainInfo.Position)
+					local mdir = MMPDefs.ConvertToVector(v.MainInfo.Position):sub(npc:position())
+					local Distance = MMPDefs.Distance(npc:position(), v.MainInfo.Position)
+
+					-- Действие с визуальной состовляющей. Оружие.
+					UpdateGun(npc, v.MainInfo.Gun)
+					-- Действие с визуальной состовляющей. Костюм.
+					UpdateOutFit(npc, v.MainInfo.Outfit)
+
+					-- Телепортация если далеко
+					if Distance > 15 then
+						npc:set_npc_position(mpos, false)
+					end
+
+					-- Задаем тип движения.
+					if npc:movement_type() ~= move.stand and v.MainInfo.MoveType == 0 and Distance < 1 then -- чтобы не прекращалась анимация если npc не рядом с точкой. 1- ЕБАНАЯ СЕТКА
+						npc:set_movement_type(move.stand)
+					elseif npc:movement_type() ~= move.walk and v.MainInfo.MoveType == 1 then
+						npc:set_movement_type(move.walk)
+					elseif npc:movement_type() ~= move.run and v.MainInfo.MoveType == 2 then
+						npc:set_movement_type(move.run)
+					elseif npc:movement_type() ~= move.run and v.MainInfo.MoveType == 3 then
+						npc:set_movement_type(move.run)
+						state_mgr.set_state(npc, "sprint")
+					end
+
+					-- Задаем стойку. Сел или встал.
+					if npc:body_state() ~= move.stand and v.MainInfo.MoveType < 4 then
+						npc:set_body_state(move.stand)
+					elseif npc:body_state() ~= move.crouch and v.MainInfo.MoveType >= 4 then
+						npc:set_body_state(move.crouch)
+						state_mgr.set_state(npc, "sneak")
+					end
+
+					-- Повороты и прицел
+					npc:set_sight(look.fire_point, mrot) -- Точка стрельбы
+					npc:set_sight(look.direction, mrot) -- Поворот
+					npc:set_dest_level_vertex_id(npc:level_vertex_id())
+					
+					npc.walk_accel = 10000000 -- не работает всё
+					npc.walk_back_coef = 10000000
+					npc.walk_strafe_coef = 10000000
+					npc.sprint_koef = 10000000
+					npc.run_coef = 10000000
+					npc.run_back_coef = 10000000
+					npc.run_strafe_coef = 10000000
+
+					-- делает небольшую задержку.
+					local ydif = mpos.y - npc:position().y
+					local vv = npc:position():lerp(npc:position(), npc:position():add(mdir:normalize()), 1)
+					vv.y = mpos.y
+
+					if (ydif > 1.5 and ydif < -1.5) or math.round(Distance) > 0.5 then -- Тупая сетка. В дистанцию 1. Лучше сделать 2. А так тепехает иногда
+						npc:set_npc_position(vv)
+					end
+				end
+			end
+		end
+	end
+end
+
+function ActionFire(CLID, shootmode)
+	if MClient.SpawnedPlayers[CLID] ~= nil then
+		local npc = level.object_by_id(MClient.SpawnedPlayers[CLID].NPC)
+		if npc and npc:active_item() and npc:active_item():get_weapon() then
+			npc:active_item():get_weapon():start_fire()
+			npc:active_item():get_weapon():stop_fire()
+		end
+	end
+end
+
+function ForceReloadGunBlyat(CLID, FireData)
+	if MClient.SpawnedPlayers[CLID] ~= nil then
+		local npc = level.object_by_id(MClient.SpawnedPlayers[CLID].NPC)
+		if npc and npc:best_weapon() then
+			log1("[Client] Игрок с ID: " .. tostring(CLID) .. " ПЕРЕЗАРЯДИЛСЯ")
+			local wpn = npc:best_weapon()
+			local section = wpn:section()
+			local magsize = (rx_wmgr and rx_wmgr.read_wpn_params(section).mag) or rx_utils.read_from_ini(nil,section,"ammo_mag_size",1)
+			--НПС сам перезаряжает оружие но т.к лучше
+			wpn:set_ammo_elapsed(magsize+1) -- вроде работает
+		end
+	end
+end
+
+function ReloadGunBlyatEND(CLID, FireData)
+	-- пригодится
+end
+
+function ThrowGrenade(CLID, EData)
+	log1("[Client] Игрок с ID: " .. tostring(CLID) .. " бросил граааанаааатууу")
+	--ActionFire()  надо добавить режим гранат
+end
+
+function DropItem(CLID, ItemParsed)
+	if MClient.SpawnedPlayers[CLID] ~= nil then
+		if ItemParsed and ItemParsed.id and ItemParsed.AreaID and ItemParsed.AreaID2 and ItemParsed.position and ItemParsed.section ~= "bolt" then
+			log1("[Client] Игрок ID: ".. tostring(CLID) .." бросил|потерял предмет: " .. tostring(ItemParsed.name) .. " секция: ".. tostring(ItemParsed.section))
+			local gamepos = vector():set(ItemParsed.position.X, ItemParsed.position.Y, ItemParsed.position.Z)
+			gamepos.y = gamepos.y + 0.15 -- чтобы не проваливался нахуй
+			local itnpc = alife():object(MClient.SpawnedPlayers[CLID].NPC)
+			local myfisting = ai:create(tostring(ItemParsed.section), gamepos, ItemParsed.AreaID, ItemParsed.AreaID2)
+			myfisting = ai:object(myfisting.id)
+			myfisting:used_ai_locations(false)
+			if ItemParsed.story_id then alife():assign_story_id(myfisting.id, ItemParsed.story_id) end
+			DropedItems[ItemParsed.id] = myfisting.id
+		end
+	end
+end
+
+function TakeItem(CLID, ItemParsed)
+	if MClient.SpawnedPlayers[CLID] ~= nil and ItemParsed then
+		local npc = level.object_by_id(MClient.SpawnedPlayers[CLID].NPC)
+		if npc and npc:id() ~= db.actor:id() and ItemParsed.name ~= "single_player" then
+			state_mgr.state_mgr.set_state(npc, "search", nil, nil, {look_position = vector():set(ItemParsed.position.X, ItemParsed.position.Y, ItemParsed.position.Z)}, {animation = true, animation_nout = true})
+			
+			-- спавним поднятый дроп в инвентарь нпс. Да и просто если вдруг умер нпс забрать нужный лут... оружие лучше не спавнить
+			-- ai:create(tostring(ItemParsed.section), db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id(), db.actor:id())
+		end
+		if DropedItems[ItemParsed.id] then
+			log1("[Client] Игрок ID: "	.. tostring(CLID) .. " поднял предмет: " .. tostring(ItemParsed.name) .. " секция: ".. tostring(ItemParsed.section))
+			local item = alife():object(DropedItems[ItemParsed.id])
+			if item and item.section ~= "actor" then
+				release(item) -- despawnitem
+				DropedItems[ItemParsed.id] = nil
+			end
+		end
+	end
+end
+
+function Jump(CLID)
+	if MClient.SpawnedPlayers[CLID] ~= nil then
+		local npc = level.object_by_id(MClient.SpawnedPlayers[CLID].NPC)
+		if npc then
+			npc:set_npc_position(npc:position():add(vector():set(0, 2, 0)), false)
+		end
+	end
+end
+
+function UseItem(CLID, ItemParsed)
+	log1("[Client] Игрок ID: "	.. tostring(CLID) .. " использовал предмет: " .. tostring(ItemParsed.name) .. " секция: ".. tostring(ItemParsed.section))
+end

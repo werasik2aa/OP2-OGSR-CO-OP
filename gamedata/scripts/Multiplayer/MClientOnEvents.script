@@ -1,0 +1,143 @@
+class "MClientOnEvents"
+--- ON CLIENT HERE ---
+function OnConnectSuccess()
+	news_manager.send_tip(db.actor, "Подключен ... получение информации..", nil, "nano", 20000)
+	local MyPlayerInfo = {
+		MoveType = MMPDefs.GetActorState(),
+		Rotation = MMPDefs.ConvertToSVector(device().cam_dir),
+		Position = MMPDefs.ConvertToSVector(db.actor:position()),
+		HP = 100,
+		Name = ConfigManager.ReadValue("NICKNAME", 0),
+		TemplateName = ConfigManager.ReadValue("TEMPLATE", 0),
+		ID = MClient.MyID,
+		AreaID = db.actor:level_vertex_id(),
+		AreaID2 = db.actor:game_vertex_id(),
+		Gun = { section = "", straped = false },
+		Outfit = { section = "" }
+	}
+	--Используем имя пк если нет то имя в config.ini
+	if MyPlayerInfo.Name == "-1" then
+		MyPlayerInfo.Name = tostring(user_name())
+	end
+
+	MyName = MyPlayerInfo.Name
+
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_PLAYER_INFO, MyPlayerInfo))
+	if not MServer.isHost then
+		MClient.SendData(iSerializer.serialize(MMPDefs.RET_INVENTORY_DATA, 0))
+	else
+		MClient.BlockInvetorySend = false
+	end
+	MClient.SendData(iSerializer.serialize(MMPDefs.RET_SERVER_GAMEINFO, 0))
+end
+--- SEND GAMEPLAY_INFO REG ---
+function OnIDead(who)
+	local KillInfo = {
+		WhoKillMe = 
+		{
+			ID = who:id(),
+			Name = who:name(),
+			section = who:section(),
+			position = { X = who:position().x, Y = who:position().y, Z = who:position().z}
+		},
+	}
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_I_DEAD, KillInfo))
+end
+
+function OnIDisconnected()
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_I_DISCONNECTED, 0))
+end
+
+function OnEDead(who, bywho)
+	local KillInfo = {
+		WhoDead = 
+		{
+			ID = who:id(),
+			Name = who:name(),
+			section = who:section(),
+			position = { X = who:position().x, Y = who:position().y, Z = who:position().z}
+		},
+		WhoKiller = 
+		{
+			ID = bywho:id(),
+			Name = bywho:name(),
+			section = bywho:section()
+		},
+	}
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_E_DEAD, KillInfo))
+end
+function OnIFire(obj)
+	local MyRot = db.actor:direction()
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_FIRE_ACTION, 0))
+end
+function OnIReload(obj)
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_RELOAD_ACTION, MMPDefs.ReadEntityData(obj)))
+end
+function OnIReload2(obj)
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_RELOAD_ACTION2, MMPDefs.ReadEntityData(obj)))
+end
+function OnIGetInfo(is, Type, RECIEVER, SENDER)
+	local iportiondata = { data = is, type = Type, to = RECIEVER, from = SENDER}
+	if isHost then
+		MServer.InfoPortionsExecuted = iportiondata
+	end
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_GIVE_INFO_PORTION, iportiondata))
+end
+function OnIReloadEND(obj)
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_RELOAD_ACTION_END, MMPDefs.ReadEntityData(obj)))
+end
+function OnIJump()
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_JUMP_ACTION, MMPDefs.ReadEntityData(obj)))
+end
+function OnIThrowGrenade(obj)
+	MClient.SendMyInvetory()
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_THROW_GRENADE, MMPDefs.ReadEntityData(obj)))
+end
+function OnIDropItem(obj)
+	MClient.SendMyInvetory()
+	--MClient.SendData(iSerializer.serialize(MMPDefs.SND_ITEM_DROPED, MMPDefs.ReadEntityData(obj)))
+end
+function OnIPickUpItem(obj)
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_ITEM_PICKUP, MMPDefs.ReadEntityData(obj)))
+end
+function OnITakeItem(obj)
+	MClient.SendMyInvetory()
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_ITEM_TAKE, MMPDefs.ReadEntityData(obj)))
+end
+function OnIUseItem(obj)
+	MClient.SendMyInvetory()
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_ITEM_USE, MMPDefs.ReadEntityData(obj)))
+end
+function OnIShowedHideWeapon(bobo)
+	-- bobo типа во время диалога спрятано оружие иль не
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_WEAPON_SHOWEDSTATE, bobo))
+end
+
+function OnEntityGetHit(obj, amount, local_direction, who, monster)
+	local WeData = {
+		WhoIT = MMPDefs.ReadEntityData(obj),
+		AmmountDrain = amount
+	}
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_ENTITY_HITDATA, WeData))
+end
+function OnIQuestUpdate(TaskPaket)
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_QUEST_DATA, TaskPaket))
+end
+function OnESpawned(a0, a1, a2, a3, a4, a5, a6)
+	if MServer.isHost then
+		local mmdms = {
+			id = a0,
+			section = a1,
+			position = MMPDefs.ConvertToSVector(a2),
+			AreaID = a3,
+			AreaID2 = a4,
+			Where = a5,
+			Ammount = a6
+		}
+		MClient.SendData(iSerializer.serialize(MMPDefs.SND_ENTITY_SPAWNED, mmdms))
+	end
+end
+
+function OnMyInvChanged(data)
+	MClient.SendData(iSerializer.serialize(MMPDefs.SND_MY_INVENTORY, data))
+end
