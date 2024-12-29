@@ -1,6 +1,5 @@
-# OP2-OGSR-CO-OP
-(Last mod update: 28-05-2024)
-Multiplayer mod for the STALKER OP2-OGSR.
+## Multiplayer mod for the STALKER OP2-OGSR.
+# (Last mod update: 28-05-2024)
 
 This is an outdated multiplayer mod for the OGSR stalker + OP2 without using the engine sources.
 The mod is obsolete and is no longer supported! There will be no updates!
